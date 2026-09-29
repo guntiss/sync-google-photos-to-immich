@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Google Photos → Immich sync",
+  "version": "0.1.0",
+  "description": "Sync selected Google Photos albums to Immich using your signed-in browser session.",
+  "permissions": [
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://photos.google.com/*",
+    "https://photos.app.goo.gl/*",
+    "https://*.googleusercontent.com/*",
+    "https://*.usercontent.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Google Photos → Immich sync"
+  },
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ]
+}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Google Photos → Immich sync</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <h1>Google Photos → Immich sync <small>stage 2: sync to Immich</small></h1>
+
+  <section>
+    <h3>Immich</h3>
+    <div class="fields">
+      <label>Server URL <input id="immichUrl" placeholder="https://immich.example.com" spellcheck="false"></label>
+      <label>API key <input id="apiKey" type="password" autocomplete="off" spellcheck="false"></label>
+      <label>Sync every (minutes, 0 = off) <input id="interval" type="number" min="0" step="5"></label>
+      <label class="check"><input id="addExisting" type="checkbox"> Also add photos already in Immich to the album</label>
+    </div>
+    <p class="hint">API key needs: asset.upload, asset.read, album.create, album.read, album.update (or "All").</p>
+  </section>
+
+  <section>
+    <h3>Albums to sync</h3>
+    <label for="albums">One shared-album URL per line</label>
+    <textarea id="albums" rows="4" spellcheck="false" placeholder="https://photos.google.com/share/AF1Qip..."></textarea>
+    <div class="row">
+      <button id="save">Save</button>
+      <button id="list">List photos</button>
+      <button id="check">Check (dry run)</button>
+      <button id="sync" class="primary">Sync now</button>
+      <span id="status"></span>
+    </div>
+    <div id="lastRun" class="hint"></div>
+  </section>
+
+  <div id="results"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

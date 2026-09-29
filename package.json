@@ -1,0 +1,12 @@
+{
+  "name": "gphotos-immich-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/gphotos.test.mjs test/immich.test.mjs",
+    "debug-browser": "node scripts/debug-browser.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.56.0"
+  }
+}
