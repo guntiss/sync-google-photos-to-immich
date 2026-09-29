@@ -10,6 +10,8 @@ Google Takeout export using [immich-go](https://github.com/simulot/immich-go): t
 recognises those existing photos correctly and only uploads what's new (tested). Photos and
 videos are both supported.
 
+![Extension page: one album syncing in the background, one up to date, one with new photos](docs/screenshots/overview.png)
+
 ## Why an extension?
 
 - **No server, no backend.** Nothing to host, deploy, secure or keep running. The extension
@@ -37,6 +39,19 @@ videos are both supported.
 - Stats: items in Immich, still to copy, failed, and files and bytes copied per sync and in total.
 - **Check** compares an album with Immich without copying anything.
 - Periodic background sync with a configurable interval. Manual and background runs never overlap.
+
+## Screenshots
+
+**Photos in an album**, each marked with whether it is already in Immich:
+
+![Photos panel of an album with items marked In Immich or Not in Immich](docs/screenshots/photos.png)
+
+**Settings**, where you connect Immich and choose how often to sync:
+
+![Settings dialog](docs/screenshots/settings.png)
+
+The screenshots show made-up albums and generated placeholder images. `npm run screenshots`
+recreates them from the real extension page.
 
 ## Install
 
