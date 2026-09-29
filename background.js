@@ -1,7 +1,4 @@
-import { loadConfig, syncAll } from './sync.js';
-
-const ALARM = 'gphotos-sync';
-let running = false;
+import { ALARM, loadConfig, runSync } from './sync.js';
 
 async function scheduleAlarm() {
   const { settings } = await loadConfig();
@@ -11,22 +8,21 @@ async function scheduleAlarm() {
 }
 
 async function runScheduled() {
-  if (running) return;
-  running = true;
   // Any extension API call resets the service worker idle timer during long transfers.
   const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
   try {
-    await syncAll({ log: (m) => console.log('[sync]', m) });
+    await runSync({ trigger: 'schedule' });
+  } catch (err) {
+    console.warn('[sync] scheduled run skipped:', err.message);
   } finally {
     clearInterval(keepAlive);
-    running = false;
   }
 }
 
 chrome.runtime.onInstalled.addListener(scheduleAlarm);
 chrome.runtime.onStartup.addListener(scheduleAlarm);
-chrome.storage.onChanged.addListener((changes) => {
-  if (changes.settings) scheduleAlarm();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.settings) scheduleAlarm();
 });
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === ALARM) runScheduled();

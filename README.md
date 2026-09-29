@@ -32,8 +32,11 @@ videos are both supported.
 - Uploads missing items **oldest first**, so an interrupted run never leaves gaps.
 - Mirrors each Google album into an Immich album with the same name (created if missing).
 - Photos and videos; originals are downloaded, not thumbnails.
-- **Check (dry run)** mode that shows per-item status without writing anything.
-- Periodic background sync with a configurable interval.
+- Per-album progress: percentage in Immich, the file being copied, download progress,
+  speed and time left. It works for background syncs too, and the toolbar icon shows the percentage.
+- Stats: items in Immich, still to copy, failed, and files and bytes copied per sync and in total.
+- **Check** compares an album with Immich without copying anything.
+- Periodic background sync with a configurable interval. Manual and background runs never overlap.
 
 ## Install
 
@@ -44,15 +47,19 @@ videos are both supported.
 
 ## Use
 
-1. Click the extension's toolbar icon to open its page.
-2. Enter your **Immich server URL** and an **API key**, and choose a sync interval
-   (`0` = manual only). Chrome asks for permission to reach your Immich server when you save.
-3. Paste one Google Photos album URL per line. Both `https://photos.google.com/share/...`
-   and `https://photos.app.goo.gl/...` links work.
-4. Click **Check (dry run)** to see what's missing, then **Sync now**. After that the
-   background sync takes over.
+1. Click the extension's toolbar icon to open its page. **Settings** opens on first use.
+2. Enter your **Immich server URL** and an **API key**, and choose how often to sync
+   automatically. Chrome asks for permission to reach your Immich server when you save,
+   and the connection is tested straight away.
+3. Paste a Google Photos shared album link and click **Add album**. Both
+   `https://photos.google.com/share/...` and `https://photos.app.goo.gl/...` links work. The
+   album is checked right away, so you see how much of it is already in Immich.
+4. Click **Sync** on an album, or **Sync all**. After that the background sync takes over.
 
-Each photo is labelled *in Immich*, *missing*, *uploaded* or *error*.
+Each album card shows its percentage in Immich, what is happening now, and its stats.
+**Photos** shows the album with each item marked *In Immich*, *Not in Immich*, *Copied* or
+*Failed*. **Activity log** keeps the last 200 events. If a sync is interrupted (Chrome
+closed, tab closed), the card says so, and the next run continues where it stopped.
 
 **API key permissions:** `asset.upload`, `asset.read`, `album.create`, `album.read`,
 `album.update` (or "All").
@@ -97,7 +104,6 @@ a checksum ever differs.
   an Immich copy of the original byte for byte.
 - One-way only: Google Photos → Immich. Nothing is ever changed or deleted in Google Photos,
   and nothing is deleted from Immich.
-- Albums with more than one page of results have had little testing on live data.
 
 ## Development
 
@@ -108,17 +114,18 @@ npm test                # unit tests (mocked fetch, fixtures modelled on real re
 
 To drive the extension from scripts, launch a dedicated Chromium with the extension loaded and
 the DevTools protocol on `:9222` (Chrome ≥ 137 ignores `--load-extension`, so this uses
-Playwright's Chromium). Sign in to Google once in that window; the profile is kept in
-`.debug-profile/`.
+Playwright's Chromium). Sign in to Google and save the Immich settings once in that window;
+the profile is kept in `.debug-profile/`. The launcher loads a copy of the extension from
+`.debug-ext/`, so restart it after changing the code. Restarting stops any sync running in it.
 
 ```sh
 IMMICH_ORIGIN=https://immich.example.com npm run debug-browser
-IMMICH_URL=https://immich.example.com IMMICH_KEY=... \
-  node scripts/probe.mjs <albumUrl> <list|check|sync>
+node scripts/probe.mjs <albumUrl> <view|check|sync> [screenshot.png]
 ```
 
 Layout: `gphotos.js` (read albums, download originals), `immich.js` (Immich API client),
-`sync.js` (orchestration), `background.js` (alarm-driven sync), `app.*` (settings and results UI).
+`sync.js` (orchestration), `state.js` (per-album progress/stats and the sync lock, shared through
+`chrome.storage`), `background.js` (alarm-driven sync), `app.*` (the extension page).
 
 ## Disclaimer
 

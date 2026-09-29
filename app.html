@@ -3,38 +3,111 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Google Photos → Immich sync</title>
+  <title>Google Photos → Immich</title>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <h1>Google Photos → Immich sync <small>stage 2: sync to Immich</small></h1>
+  <header class="top">
+    <h1>Google Photos → Immich</h1>
+    <button id="conn" class="pill" type="button" title="Immich connection — click to change">…</button>
+    <button id="openSettings" type="button">Settings</button>
+  </header>
 
-  <section>
-    <h3>Immich</h3>
-    <div class="fields">
-      <label>Server URL <input id="immichUrl" placeholder="https://immich.example.com" spellcheck="false"></label>
-      <label>API key <input id="apiKey" type="password" autocomplete="off" spellcheck="false"></label>
-      <label>Sync every (minutes, 0 = off) <input id="interval" type="number" min="0" step="5"></label>
-      <label class="check"><input id="addExisting" type="checkbox"> Also add photos already in Immich to the album</label>
+  <div id="banner" class="banner" hidden></div>
+
+  <section class="overview">
+    <div id="tiles" class="tiles"></div>
+    <div class="toolbar">
+      <button id="syncAll" class="primary" type="button">Sync all</button>
+      <button id="checkAll" type="button" title="Compare with Immich without copying anything">Check all</button>
+      <span id="schedule" class="muted"></span>
     </div>
-    <p class="hint">API key needs: asset.upload, asset.read, album.create, album.read, album.update (or "All").</p>
   </section>
 
-  <section>
-    <h3>Albums to sync</h3>
-    <label for="albums">One shared-album URL per line</label>
-    <textarea id="albums" rows="4" spellcheck="false" placeholder="https://photos.google.com/share/AF1Qip..."></textarea>
-    <div class="row">
-      <button id="save">Save</button>
-      <button id="list">List photos</button>
-      <button id="check">Check (dry run)</button>
-      <button id="sync" class="primary">Sync now</button>
-      <span id="status"></span>
-    </div>
-    <div id="lastRun" class="hint"></div>
-  </section>
+  <main id="albums"></main>
 
-  <div id="results"></div>
+  <form id="addForm" class="add">
+    <input id="addUrl" type="url" placeholder="Paste a Google Photos shared album link (photos.google.com/share/… or photos.app.goo.gl/…)" required>
+    <button class="primary" type="submit">Add album</button>
+  </form>
+  <p id="addError" class="error-text" hidden></p>
+
+  <dialog id="settings">
+    <form id="settingsForm" method="dialog">
+      <h2>Settings</h2>
+      <label>Immich server URL
+        <input id="immichUrl" type="url" placeholder="https://immich.example.com" spellcheck="false" required>
+      </label>
+      <label>API key
+        <input id="apiKey" type="password" autocomplete="off" spellcheck="false" required>
+        <small>Needs asset.upload, asset.read, album.create, album.read, album.update (or "All").</small>
+      </label>
+      <label>Automatic sync
+        <select id="interval">
+          <option value="0">Off</option>
+          <option value="15">Every 15 minutes</option>
+          <option value="30">Every 30 minutes</option>
+          <option value="60">Every hour</option>
+          <option value="180">Every 3 hours</option>
+          <option value="360">Every 6 hours</option>
+          <option value="720">Every 12 hours</option>
+          <option value="1440">Once a day</option>
+        </select>
+        <small>Runs in the background while Chrome is open.</small>
+      </label>
+      <label class="check">
+        <input id="addExisting" type="checkbox">
+        Also add photos that are already in Immich to the Immich album
+      </label>
+      <p id="connResult" class="muted" hidden></p>
+      <div class="dialog-actions">
+        <button id="cancelSettings" type="button">Cancel</button>
+        <button id="saveSettings" class="primary" type="submit">Save &amp; test connection</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="cardTpl">
+    <article class="card">
+      <div class="card-head">
+        <div class="card-title">
+          <h2 class="title"></h2>
+          <p class="meta"></p>
+          <a class="src" target="_blank" rel="noreferrer"></a>
+        </div>
+        <div class="card-actions">
+          <button data-action="check" type="button" title="Compare with Immich without copying anything">Check</button>
+          <button data-action="sync" class="primary" type="button">Sync</button>
+          <button data-action="remove" class="icon" type="button" title="Stop syncing this album">✕</button>
+        </div>
+      </div>
+      <div class="progress">
+        <div class="bar"><span></span></div>
+        <span class="pct"></span>
+      </div>
+      <p class="status"></p>
+      <dl class="stats"></dl>
+      <details class="photos">
+        <summary>Photos</summary>
+        <div class="photos-bar">
+          <select class="filter">
+            <option value="todo">Not in Immich</option>
+            <option value="all">All</option>
+          </select>
+          <span class="muted photos-note"></span>
+        </div>
+        <div class="grid"></div>
+      </details>
+      <details class="activity">
+        <summary>Activity log</summary>
+        <pre class="log"></pre>
+        <div class="debug">
+          <button data-action="export" type="button">Download photo list (JSON)</button>
+          <button data-action="raw" type="button">Download raw Google data (debug)</button>
+        </div>
+      </details>
+    </article>
+  </template>
 
   <script type="module" src="app.js"></script>
 </body>

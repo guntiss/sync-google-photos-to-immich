@@ -37,6 +37,10 @@ export class Immich {
     return this.request('GET', '/users/me');
   }
 
+  about() {
+    return this.request('GET', '/server/about');
+  }
+
   listAlbums() {
     return this.request('GET', '/albums');
   }

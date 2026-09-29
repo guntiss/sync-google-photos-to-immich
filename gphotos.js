@@ -277,18 +277,38 @@ function filenameFromDisposition(cd) {
  * Download the original file of an item (=d photo, =dv video).
  * Returns the blob plus its SHA-1 in hex and in Google's dedupKey encoding, so the
  * caller can verify the bytes are the original.
+ * @param {{onProgress?: (p: {filename: string, received: number, total: number|null}) => void}} opts
  */
-export async function downloadOriginal(item) {
+export async function downloadOriginal(item, { onProgress } = {}) {
   const res = await fetch(`${item.thumbUrl}=${item.isVideo ? 'dv' : 'd'}`, { credentials: 'include' });
   if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
   const type = res.headers.get('content-type') || '';
   if (type.startsWith('text/')) throw new Error(`Download returned ${type}, not media`);
-  const buf = await res.arrayBuffer();
-  const digest = await crypto.subtle.digest('SHA-1', buf);
   const ext = (type.split('/')[1] || 'bin').replace('jpeg', 'jpg').split(';')[0];
+  const filename = filenameFromDisposition(res.headers.get('content-disposition') || '') || `${item.mediaKey}.${ext}`;
+  const total = Number(res.headers.get('content-length')) || null;
+
+  let buf;
+  if (onProgress && res.body) {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let received = 0;
+    onProgress({ filename, received, total });
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.byteLength;
+      onProgress({ filename, received, total });
+    }
+    buf = await new Blob(chunks).arrayBuffer();
+  } else {
+    buf = await res.arrayBuffer();
+  }
+  const digest = await crypto.subtle.digest('SHA-1', buf);
   return {
     blob: new Blob([buf], { type }),
-    filename: filenameFromDisposition(res.headers.get('content-disposition') || '') || `${item.mediaKey}.${ext}`,
+    filename,
     sha1Hex: hex(digest),
     sha1Key: toDedupKey(digest),
     size: buf.byteLength,

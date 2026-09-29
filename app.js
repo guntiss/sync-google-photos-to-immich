@@ -1,47 +1,53 @@
 import { listAlbum } from './gphotos.js';
-import { normalizeBaseUrl } from './immich.js';
-import { loadConfig, syncAlbum } from './sync.js';
+import { Immich, normalizeBaseUrl } from './immich.js';
+import { ALARM, BusyError, loadConfig, runSync } from './sync.js';
+import {
+  getLock, getStates, isLockActive, LOCK_KEY, percentDone, removeState, RUNNING_PHASES, urlFromKey,
+} from './state.js';
 
 const $ = (id) => document.getElementById(id);
-const albumsEl = $('albums');
-const statusEl = $('status');
-const resultsEl = $('results');
-const buttons = ['save', 'list', 'check', 'sync'].map($);
 
-const urls = () => albumsEl.value.split('\n').map((s) => s.trim()).filter(Boolean);
+let config = { settings: {}, albums: [] };
+let states = {}; // album url -> shared state (see state.js / sync.js)
+let lock = null;
+let lastRun = null;
+let alarm = null;
+let localRun = false;
+const cards = new Map(); // album url -> DOM refs
+const results = new Map(); // album url -> {album, status} from runs made in this page
 
-function readSettings() {
-  return {
-    immichUrl: $('immichUrl').value.trim(),
-    apiKey: $('apiKey').value.trim(),
-    intervalMinutes: Number($('interval').value) || 0,
-    addExisting: $('addExisting').checked,
-  };
+// ---------- formatting
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1000)));
+  return `${(n / 1000 ** i).toFixed(i >= 2 ? 1 : 0)} ${units[i]}`;
 }
 
-async function save() {
-  const settings = readSettings();
-  if (settings.immichUrl) {
-    // Immich sends no CORS headers, so the extension needs host access to it.
-    // Must run early in the click handler to keep the user-gesture.
-    const origins = [`${new URL(settings.immichUrl).origin}/*`];
-    if (!(await chrome.permissions.contains({ origins }))) {
-      if (!(await chrome.permissions.request({ origins }))) {
-        statusEl.textContent = `Permission for ${origins[0]} was denied.`;
-        return false;
-      }
-    }
-    settings.immichUrl = normalizeBaseUrl(settings.immichUrl);
-    $('immichUrl').value = settings.immichUrl;
-  }
-  await chrome.storage.local.set({ settings, albums: urls() });
-  statusEl.textContent = 'Saved.';
-  return true;
+function fmtDuration(ms) {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h ${m % 60} min`;
 }
+
+function ago(ms) {
+  const s = (Date.now() - ms) / 1000;
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const num = (n) => (n ?? 0).toLocaleString();
+const plural = (n, word) => `${num(n)} ${word}${n === 1 ? '' : 's'}`;
 
 function el(tag, props = {}, ...children) {
   const node = Object.assign(document.createElement(tag), props);
-  node.append(...children);
+  node.append(...children.filter((c) => c !== null && c !== undefined && c !== false));
   return node;
 }
 
@@ -52,129 +58,511 @@ function download(name, obj) {
   URL.revokeObjectURL(a.href);
 }
 
+// ---------- running
+
+const configured = () => Boolean(config.settings.immichUrl && config.settings.apiKey);
+const busy = () => localRun || isLockActive(lock);
+
+function showBanner(msg, kind = 'err') {
+  const b = $('banner');
+  b.hidden = !msg;
+  b.className = `banner ${kind}`;
+  b.textContent = msg ?? '';
+}
+
+async function start({ urls, dryRun }) {
+  if (busy()) return;
+  showBanner(null);
+  localRun = true;
+  refreshAll();
+  try {
+    await runSync({
+      urls,
+      dryRun,
+      onAlbum: (url, r) => {
+        results.set(url, r);
+        const c = cards.get(url);
+        if (!c) return;
+        const todo = Object.values(r.status).some((x) => x.state === 'missing' || x.state === 'error');
+        c.filter.value = todo ? 'todo' : 'all';
+        if (c.photos.open) renderGrid(url);
+      },
+    });
+  } catch (err) {
+    showBanner(err instanceof BusyError ? 'Another sync is already running. Wait for it to finish.' : err.message);
+  } finally {
+    localRun = false;
+    refreshAll();
+  }
+}
+
+// ---------- album cards
+
+function createCard(url) {
+  const node = $('cardTpl').content.firstElementChild.cloneNode(true);
+  const q = (s) => node.querySelector(s);
+  const c = {
+    node,
+    title: q('.title'), meta: q('.meta'), src: q('.src'),
+    bar: q('.bar'), fill: q('.bar span'), pct: q('.pct'),
+    status: q('.status'), stats: q('.stats'),
+    photos: q('.photos'), filter: q('.filter'), grid: q('.grid'), note: q('.photos-note'),
+    log: q('.log'),
+    buttons: [...node.querySelectorAll('[data-action=check], [data-action=sync]')],
+  };
+  c.src.href = url;
+  c.src.textContent = url.replace(/^https:\/\//, '');
+  q('[data-action=check]').onclick = () => start({ urls: [url], dryRun: true });
+  q('[data-action=sync]').onclick = () => start({ urls: [url], dryRun: false });
+  q('[data-action=remove]').onclick = () => removeAlbum(url);
+  q('[data-action=export]').onclick = () => exportList(url);
+  q('[data-action=raw]').onclick = () => exportRaw(url);
+  c.photos.addEventListener('toggle', () => c.photos.open && openPhotos(url));
+  c.filter.onchange = () => renderGrid(url);
+  cards.set(url, c);
+  return c;
+}
+
+function describe(s, running, interrupted) {
+  if (!s) return { text: 'Not checked yet. Click Check to compare it with Immich.' };
+  if (interrupted) {
+    const where = s.phase === 'uploading' ? ` after ${s.run.done} of ${s.run.toUpload}` : '';
+    return { text: `Interrupted${where}. Run Sync again to continue.`, tone: 'warn' };
+  }
+  if (running) {
+    const r = s.run ?? {};
+    switch (s.phase) {
+      case 'listing':
+        return { text: `Reading the album from Google Photos… ${s.listed ? plural(s.listed, 'item') : ''}` };
+      case 'checking':
+        return { text: `Comparing ${plural(s.total, 'item')} with Immich…` };
+      case 'album':
+        return { text: 'Updating the Immich album…' };
+      case 'uploading': {
+        const cur = r.current;
+        const step = !cur
+          ? ''
+          : cur.step === 'uploading'
+            ? ` · uploading ${fmtBytes(cur.size)} to Immich…`
+            : ` · downloading ${fmtBytes(cur.received)}${cur.size ? ` of ${fmtBytes(cur.size)}` : ''}`;
+        let sub = '';
+        if (r.done > 0 && r.uploadStartedAt) {
+          const elapsed = Date.now() - r.uploadStartedAt;
+          const rate = r.uploadedBytes / (elapsed / 1000);
+          const left = (elapsed / r.done) * (r.toUpload - r.done);
+          sub = `${fmtBytes(rate)}/s · about ${fmtDuration(left)} left`;
+        }
+        const n = Math.min(r.done + 1, r.toUpload);
+        return { text: `Copying ${num(n)} of ${num(r.toUpload)}${cur?.name ? `: ${cur.name}` : ''}${step}`, sub };
+      }
+    }
+  }
+  if (s.phase === 'error') return { text: s.message, tone: 'err' };
+  if (s.failed) return { text: `${plural(s.failed, 'item')} could not be copied. See the activity log.`, tone: 'err' };
+  if (s.missing) {
+    return { text: `${plural(s.missing, 'item')} not in Immich yet. Click Sync to copy them.`, tone: 'warn' };
+  }
+  const r = s.run ?? {};
+  if (s.mode === 'sync' && r.uploadedFiles) {
+    return {
+      text: `Up to date. Copied ${plural(r.uploadedFiles, 'item')} (${fmtBytes(r.uploadedBytes)}) in ${fmtDuration(r.finishedAt - r.startedAt)}.`,
+      tone: 'ok',
+    };
+  }
+  return { text: 'Up to date. Everything is in Immich.', tone: 'ok' };
+}
+
+function updateCard(url) {
+  const c = cards.get(url);
+  if (!c) return;
+  const s = states[url];
+  const lockOn = isLockActive(lock);
+  const inRunPhase = Boolean(s && RUNNING_PHASES.has(s.phase));
+  const running = inRunPhase && lockOn && (s.run?.startedAt ?? 0) >= (lock.since ?? 0);
+  const interrupted = inRunPhase && !running && !localRun;
+  const pct = percentDone(s);
+
+  c.title.textContent = s?.title || 'New album';
+  c.meta.textContent = s?.total
+    ? `${plural(s.total, 'item')}${s.videos ? ` (${num(s.videos)} videos)` : ''} → Immich album “${s.immichAlbum ?? s.title}”`
+    : '';
+
+  const indeterminate = running && (s.phase === 'listing' || s.phase === 'checking');
+  c.bar.classList.toggle('indeterminate', indeterminate);
+  c.fill.style.width = `${pct ?? 0}%`;
+  c.pct.textContent = indeterminate || pct === null ? '—' : `${pct}%`;
+  c.node.classList.toggle('running', running);
+  c.node.classList.toggle('complete', !running && pct === 100);
+  c.node.classList.toggle('has-errors', !running && Boolean(s?.failed));
+
+  const d = describe(s, running, interrupted);
+  c.status.className = `status ${d.tone ?? ''}`;
+  c.status.replaceChildren(d.text ?? '', d.sub ? el('span', { className: 'sub' }, d.sub) : '');
+
+  const r = s?.run;
+  const last = s?.lastSync;
+  const stat = (k, v) => el('div', {}, el('dt', {}, k), el('dd', {}, v));
+  c.stats.replaceChildren(
+    ...(s?.total
+      ? [
+          stat('In Immich', `${num(s.total - s.missing - s.failed)} of ${num(s.total)}`),
+          stat('To copy', num(s.missing)),
+          stat('Failed', num(s.failed)),
+          running && s.phase === 'uploading'
+            ? stat('Copied this run', `${plural(r.uploadedFiles, 'file')} · ${fmtBytes(r.uploadedBytes)}`)
+            : stat('Last sync copied', last ? `${plural(last.files, 'file')} · ${fmtBytes(last.bytes)}` : '—'),
+          stat('Copied all time', `${plural(s.totals.uploadedFiles, 'file')} · ${fmtBytes(s.totals.uploadedBytes)}`),
+          stat('Last synced', s.lastSyncAt ? ago(s.lastSyncAt) : s.lastCheckAt ? `never (checked ${ago(s.lastCheckAt)})` : 'never'),
+        ]
+      : []),
+  );
+
+  const atBottom = c.log.scrollTop + c.log.clientHeight >= c.log.scrollHeight - 4;
+  c.log.textContent = s?.log?.length ? s.log.join('\n') : 'Nothing yet.';
+  if (atBottom) c.log.scrollTop = c.log.scrollHeight;
+
+  const disabled = busy() || !configured();
+  c.buttons.forEach((b) => (b.disabled = disabled));
+}
+
+function renderAlbums() {
+  const main = $('albums');
+  for (const url of cards.keys()) if (!config.albums.includes(url)) cards.delete(url);
+  if (!config.albums.length) {
+    main.replaceChildren(el('div', { className: 'empty' }, 'No albums yet. Paste a Google Photos shared album link below to start.'));
+    return;
+  }
+  main.replaceChildren(...config.albums.map((url) => (cards.get(url) ?? createCard(url)).node));
+  config.albums.forEach(updateCard);
+}
+
+// ---------- photo grid
+
 // Google's image host sends Cross-Origin-Resource-Policy: same-site, so a plain
 // <img> is blocked on an extension page. A fetch with host permission is not.
 const thumbQueue = [];
 let thumbActive = 0;
 function pumpThumbs() {
   while (thumbActive < 6 && thumbQueue.length) {
-    const { img, url } = thumbQueue.shift();
+    const img = thumbQueue.shift();
     thumbActive++;
-    fetch(url, { credentials: 'include' })
+    fetch(img.dataset.src, { credentials: 'include' })
       .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((b) => (img.src = URL.createObjectURL(b)))
-      .catch((e) => (img.alt = `thumb failed: ${e.message}`))
+      .then((b) => {
+        img.onload = () => URL.revokeObjectURL(img.src);
+        img.src = URL.createObjectURL(b);
+      })
+      .catch((e) => (img.alt = `thumbnail failed: ${e.message}`))
       .finally(() => {
         thumbActive--;
         pumpThumbs();
       });
   }
 }
-function thumb(it) {
-  const img = el('img');
-  thumbQueue.push({ img, url: `${it.thumbUrl}=w280-h280-c` });
-  pumpThumbs();
-  return img;
-}
+const thumbObserver = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      thumbObserver.unobserve(e.target);
+      thumbQueue.push(e.target);
+    }
+    pumpThumbs();
+  },
+  { rootMargin: '400px' },
+);
 
 const STATE_LABEL = {
-  'in-immich': '✓ in Immich',
-  missing: '● missing',
-  uploaded: '⬆ uploaded',
-  trashed: '🗑 in Immich trash',
-  error: '⚠ error',
+  'in-immich': '✓ In Immich',
+  missing: '● Not in Immich',
+  uploaded: '⬆ Copied',
+  trashed: 'In Immich trash',
+  error: '⚠ Failed',
 };
 
-function renderAlbum(box, result, status, summary) {
-  const { title, items, pages, albumKey, url } = result;
-  const videos = items.filter((i) => i.isVideo).length;
-  box.replaceChildren(
-    el('h2', {}, title || '(untitled album)'),
-    el('div', { className: 'meta' }, `${items.length} items (${videos} videos), ${pages} page(s) — ${url}`),
-    summary ? el('div', { className: 'meta summary' }, JSON.stringify(summary)) : '',
-    el('div', { className: 'row' },
-      el('button', { onclick: () => download(`album-${albumKey}.json`, items) }, 'Download list (JSON)'),
-      el('button', {
-        onclick: async (e) => {
-          e.target.disabled = true;
-          const raw = await listAlbum(url, { debug: true });
-          download(`album-${albumKey}-raw.json`, raw.debug);
-          e.target.disabled = false;
-        },
-      }, 'Download raw (debug)'),
-    ),
-    el('div', { className: 'grid' },
-      ...items.map((it) => {
-        const st = status?.[it.mediaKey];
-        return el('div', { className: `item ${st?.state ?? ''}`, title: st?.message ?? it.mediaKey },
-          thumb(it),
-          el('div', {},
-            new Date(it.takenMs).toLocaleString(),
-            ` · ${it.width}×${it.height}`,
-            it.isVideo ? el('span', { className: 'badge' }, ' ▶ video') : '',
-            st ? el('div', { className: `st ${st.state}` }, STATE_LABEL[st.state] ?? st.state) : '',
-          ),
-        );
-      }),
-    ),
+async function openPhotos(url) {
+  const c = cards.get(url);
+  if (results.has(url)) return renderGrid(url);
+  c.grid.replaceChildren();
+  if (busy()) {
+    c.note.textContent = 'Available when the current sync finishes.';
+    return;
+  }
+  c.note.textContent = 'Checking the album…';
+  await start({ urls: [url], dryRun: true });
+  if (!results.has(url)) c.note.textContent = 'Could not load the album. See the status above.';
+}
+
+function renderGrid(url) {
+  const c = cards.get(url);
+  const { album, status } = results.get(url);
+  const todo = (it) => ['missing', 'error'].includes(status[it.mediaKey]?.state);
+  const items = c.filter.value === 'todo' ? album.items.filter(todo) : album.items;
+  c.note.textContent =
+    c.filter.value === 'todo' && !items.length ? 'Everything is in Immich.' : `${plural(items.length, 'item')}, newest first`;
+  c.grid.replaceChildren(
+    ...items.map((it) => {
+      const st = status[it.mediaKey];
+      const img = el('img', { alt: '' });
+      img.dataset.src = `${it.thumbUrl}=w260-h260-c`;
+      thumbObserver.observe(img);
+      return el('div', { className: `item ${st?.state ?? ''}`, title: st?.message ?? '' },
+        img,
+        el('div', { className: 'cap' },
+          new Date(it.takenMs).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }),
+          it.isVideo ? ' · ▶ video' : '',
+          st ? el('div', { className: `st ${st.state}` }, STATE_LABEL[st.state] ?? st.state) : null,
+        ),
+      );
+    }),
   );
 }
 
-async function run(mode) {
-  if (!(await save())) return;
-  buttons.forEach((b) => (b.disabled = true));
-  resultsEl.replaceChildren();
-  const settings = readSettings();
-  for (const url of urls()) {
-    const log = el('pre', { className: 'log' });
-    const box = el('div', { className: 'album' }, el('div', { className: 'meta' }, `Loading ${url} …`), log);
-    resultsEl.append(box);
-    const addLog = (m) => {
-      log.append(m + '\n');
-      log.scrollTop = log.scrollHeight;
-      console.log('[sync]', m);
-    };
-    try {
-      if (mode === 'list') {
-        const result = await listAlbum(url, {
-          onProgress: (n) => (box.firstChild.textContent = `Loading ${url} … ${n} items`),
-        });
-        renderAlbum(box, result);
-      } else {
-        const r = await syncAlbum(url, settings, { dryRun: mode === 'check', log: addLog });
-        renderAlbum(box, r.album, r.status, r.summary);
-        box.append(log);
-      }
-    } catch (err) {
-      box.replaceChildren(
-        el('div', { className: 'meta' }, url),
-        el('div', { className: 'error' }, err.message),
-        err.debug ? el('div', { className: 'row' }, el('button', { onclick: () => download('album-raw-html.json', err.debug) }, 'Download raw (debug)')) : '',
-      );
-      console.error(url, err);
+async function exportList(url) {
+  try {
+    const album = results.get(url)?.album ?? (await listAlbum(url));
+    download(`album-${album.albumKey}.json`, album.items);
+  } catch (err) {
+    showBanner(err.message);
+  }
+}
+
+async function exportRaw(url) {
+  try {
+    const raw = await listAlbum(url, { debug: true });
+    download(`album-${raw.albumKey}-raw.json`, raw.debug);
+  } catch (err) {
+    if (err.debug) download('album-raw.json', err.debug);
+    else showBanner(err.message);
+  }
+}
+
+// ---------- add / remove albums
+
+function isAlbumLink(raw) {
+  try {
+    const u = new URL(raw);
+    return (u.hostname === 'photos.google.com' && u.pathname.startsWith('/share/')) || u.hostname === 'photos.app.goo.gl';
+  } catch {
+    return false;
+  }
+}
+
+$('addForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const raw = $('addUrl').value.trim();
+  const err = $('addError');
+  err.hidden = true;
+  if (!isAlbumLink(raw)) {
+    err.textContent = "That isn't a shared album link. In Google Photos open the album, click Share, then Copy link.";
+    err.hidden = false;
+    return;
+  }
+  if (config.albums.includes(raw)) {
+    err.textContent = 'That album is already in the list.';
+    err.hidden = false;
+    return;
+  }
+  config.albums = [...config.albums, raw];
+  await chrome.storage.local.set({ albums: config.albums });
+  $('addUrl').value = '';
+  renderAlbums();
+  renderOverview();
+  if (configured()) start({ urls: [raw], dryRun: true });
+};
+
+async function removeAlbum(url) {
+  const title = states[url]?.title ?? 'this album';
+  if (!confirm(`Stop syncing “${title}”?\n\nNothing is deleted. Photos already copied stay in Immich.`)) return;
+  config.albums = config.albums.filter((u) => u !== url);
+  delete states[url];
+  results.delete(url);
+  await chrome.storage.local.set({ albums: config.albums });
+  await removeState(url);
+  renderAlbums();
+  renderOverview();
+}
+
+// ---------- overview, connection, schedule
+
+function renderOverview() {
+  const known = config.albums.map((u) => states[u]).filter((s) => s?.total);
+  const total = known.reduce((a, s) => a + s.total, 0);
+  const done = known.reduce((a, s) => a + s.total - s.missing - s.failed, 0);
+  const files = known.reduce((a, s) => a + s.totals.uploadedFiles, 0);
+  const bytes = known.reduce((a, s) => a + s.totals.uploadedBytes, 0);
+  const tile = (v, k) => el('div', { className: 'tile' }, el('div', { className: 'v' }, v), el('div', { className: 'k' }, k));
+  $('tiles').replaceChildren(
+    tile(num(config.albums.length), config.albums.length === 1 ? 'album' : 'albums'),
+    tile(num(total), 'items in Google Photos'),
+    tile(total ? `${Math.floor((100 * done) / total)}%` : '—', `in Immich (${num(done)})`),
+    tile(fmtBytes(bytes), `copied so far (${plural(files, 'file')})`),
+  );
+
+  const off = busy() || !configured() || !config.albums.length;
+  $('syncAll').disabled = off;
+  $('checkAll').disabled = off;
+
+  const minutes = Number(config.settings.intervalMinutes);
+  const parts = [];
+  if (isLockActive(lock)) {
+    const what = lock.mode === 'check' ? 'Check' : 'Sync';
+    parts.push(lock.trigger === 'schedule' ? `Automatic ${what.toLowerCase()} running…` : `${what} running…`);
+  }
+  else if (minutes > 0) {
+    const every = $('interval').querySelector(`option[value="${minutes}"]`)?.textContent.toLowerCase() ?? `every ${minutes} minutes`;
+    parts.push(`Auto-sync ${every}${alarm ? `, next at ${clock(alarm.scheduledTime)}` : ''}`);
+  } else parts.push('Auto-sync off');
+  if (lastRun) {
+    const what = `${lastRun.trigger === 'schedule' ? 'automatic' : 'manual'} ${lastRun.dryRun ? 'check' : 'sync'}`;
+    const bad = lastRun.error || lastRun.results?.some((r) => r.error || r.failed);
+    parts.push(`last ${what} ${ago(lastRun.at)}${bad ? ' (with errors)' : ''}`);
+  }
+  $('schedule').textContent = parts.join(' · ');
+}
+
+async function updateConnection() {
+  const pill = $('conn');
+  pill.className = 'pill';
+  if (!configured()) {
+    pill.textContent = 'Immich not connected';
+    showBanner('Connect your Immich server to get started: open Settings.', 'info');
+    return;
+  }
+  const { immichUrl, apiKey } = config.settings;
+  const host = new URL(immichUrl).host;
+  if (!(await chrome.permissions.contains({ origins: [`${new URL(immichUrl).origin}/*`] }))) {
+    pill.classList.add('err');
+    pill.textContent = `${host}: access not granted`;
+    return;
+  }
+  pill.textContent = `${host}…`;
+  try {
+    const immich = new Immich(immichUrl, apiKey);
+    const [me, about] = await Promise.all([immich.me(), immich.about().catch(() => null)]);
+    pill.classList.add('ok');
+    pill.textContent = `${host} · ${me.name}${about?.version ? ` · Immich ${about.version}` : ''}`;
+    pill.title = 'Connected. Click to change.';
+  } catch (err) {
+    pill.classList.add('err');
+    pill.textContent = `${host}: can't connect`;
+    pill.title = err.message;
+  }
+}
+
+async function refreshAlarm() {
+  alarm = (await chrome.alarms.get(ALARM)) ?? null;
+}
+
+function refreshAll() {
+  config.albums.forEach(updateCard);
+  renderOverview();
+}
+
+// ---------- settings dialog
+
+function openSettings() {
+  const s = config.settings;
+  $('immichUrl').value = s.immichUrl;
+  $('apiKey').value = s.apiKey;
+  const sel = $('interval');
+  const v = String(s.intervalMinutes ?? 0);
+  if (![...sel.options].some((o) => o.value === v)) sel.append(el('option', { value: v, textContent: `Every ${v} minutes` }));
+  sel.value = v;
+  $('addExisting').checked = s.addExisting;
+  $('connResult').hidden = true;
+  $('settings').showModal();
+}
+
+function connResult(text, tone) {
+  const p = $('connResult');
+  p.hidden = false;
+  p.className = tone ?? 'muted';
+  p.textContent = text;
+}
+
+$('settingsForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const next = {
+    immichUrl: $('immichUrl').value.trim(),
+    apiKey: $('apiKey').value.trim(),
+    intervalMinutes: Number($('interval').value) || 0,
+    addExisting: $('addExisting').checked,
+  };
+  let origin;
+  try {
+    origin = new URL(next.immichUrl).origin;
+  } catch {
+    return connResult('That server URL is not valid.', 'err');
+  }
+  // Immich sends no CORS headers, so the extension needs host access to it. This must
+  // be the first await so it still counts as part of the click.
+  if (!(await chrome.permissions.request({ origins: [`${origin}/*`] }))) {
+    return connResult(`Chrome did not grant access to ${origin}.`, 'err');
+  }
+  next.immichUrl = normalizeBaseUrl(next.immichUrl);
+  connResult('Testing connection…');
+  try {
+    const me = await new Immich(next.immichUrl, next.apiKey).me();
+    connResult(`Connected as ${me.name}.`, 'ok');
+  } catch (err) {
+    return connResult(`Could not connect: ${err.message}`, 'err');
+  }
+  config.settings = next;
+  await chrome.storage.local.set({ settings: next });
+  $('settings').close();
+  showBanner(null);
+  updateConnection();
+  setTimeout(() => refreshAlarm().then(renderOverview), 500); // background re-schedules on save
+  refreshAll();
+};
+
+$('cancelSettings').onclick = () => $('settings').close();
+$('openSettings').onclick = openSettings;
+$('conn').onclick = openSettings;
+$('syncAll').onclick = () => start({ dryRun: false });
+$('checkAll').onclick = () => start({ dryRun: true });
+
+// ---------- live updates
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'session' && LOCK_KEY in changes) {
+    lock = changes[LOCK_KEY].newValue ?? null;
+    refreshAll();
+    return;
+  }
+  if (area !== 'local') return;
+  for (const [key, ch] of Object.entries(changes)) {
+    const url = urlFromKey(key);
+    if (url && cards.has(url)) {
+      states[url] = ch.newValue ?? null;
+      updateCard(url);
     }
   }
-  statusEl.textContent = 'Done.';
-  buttons.forEach((b) => (b.disabled = false));
-}
+  if (changes.lastRun) lastRun = changes.lastRun.newValue ?? null;
+  if (changes.albums) {
+    config.albums = changes.albums.newValue ?? [];
+    getStates(config.albums).then((s) => {
+      states = s;
+      renderAlbums();
+      renderOverview();
+    });
+  }
+  renderOverview();
+});
 
-$('save').onclick = save;
-$('list').onclick = () => run('list');
-$('check').onclick = () => run('check');
-$('sync').onclick = () => run('sync');
+// Relative times, ETA and stale-lock detection.
+setInterval(() => refreshAlarm().then(refreshAll), 15_000);
 
-const { settings, albums } = await loadConfig();
-$('immichUrl').value = settings.immichUrl;
-$('apiKey').value = settings.apiKey;
-$('interval').value = settings.intervalMinutes;
-$('addExisting').checked = settings.addExisting;
-albumsEl.value = albums.join('\n');
+// ---------- init
 
-const { lastRun } = await chrome.storage.local.get('lastRun');
-if (lastRun) {
-  $('lastRun').textContent =
-    `Last background sync: ${new Date(lastRun.at).toLocaleString()} — ` +
-    lastRun.results
-      .map((r) => (r.error ? `error: ${r.error}` : `${r.summary.title}: ${r.summary.uploaded} uploaded, ${r.summary.missing} missing`))
-      .join('; ');
-}
+config = await loadConfig();
+[states, lock, { lastRun = null }] = await Promise.all([
+  getStates(config.albums),
+  getLock(),
+  chrome.storage.local.get('lastRun'),
+  refreshAlarm(),
+]);
+renderAlbums();
+renderOverview();
+updateConnection();
+if (!configured()) openSettings();

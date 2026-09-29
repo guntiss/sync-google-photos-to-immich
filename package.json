@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/gphotos.test.mjs test/immich.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "debug-browser": "node scripts/debug-browser.mjs"
   },
   "devDependencies": {
