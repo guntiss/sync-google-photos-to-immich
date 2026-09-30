@@ -30,7 +30,9 @@ export class Immich {
     const res = await fetch(this.api + path, { method, headers: h, body, signal: this.signal });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`Immich ${method} ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
+      const err = new Error(`Immich ${method} ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
+      err.status = res.status;
+      throw err;
     }
     return res.json();
   }
@@ -51,15 +53,35 @@ export class Immich {
     return this.request('POST', '/albums', { json: { albumName } });
   }
 
-  async albumAssetIds(albumId) {
-    const ids = new Set();
-    let page = 1;
-    for (;;) {
-      const r = await this.request('POST', '/search/metadata', { json: { albumIds: [albumId], size: 1000, page } });
-      r.assets.items.forEach((a) => ids.add(a.id));
-      if (!r.assets.nextPage) return ids;
-      page = Number(r.assets.nextPage);
+  // Every asset matching a /search/metadata query, across pages.
+  async searchAll(query) {
+    const assets = [];
+    for (let page = 1; page; ) {
+      const r = await this.request('POST', '/search/metadata', { json: { ...query, size: 1000, page } });
+      assets.push(...r.assets.items);
+      page = r.assets.nextPage ? Number(r.assets.nextPage) : 0;
     }
+    return assets;
+  }
+
+  async albumAssetIds(albumId) {
+    return new Set((await this.searchAll({ albumIds: [albumId] })).map((a) => a.id));
+  }
+
+  // Assets captured between two Dates (inclusive), trashed ones included.
+  searchTaken(after, before) {
+    return this.searchAll({ takenAfter: after.toISOString(), takenBefore: before.toISOString(), withDeleted: true });
+  }
+
+  // -> [{key, value, updatedAt}]
+  getMetadata(assetId) {
+    return this.request('GET', `/assets/${assetId}/metadata`);
+  }
+
+  // Upserts items: [{assetId, key, value(object)}]. Fails as a whole (HTTP 400) if any
+  // asset is gone.
+  setMetadata(items) {
+    return this.request('PUT', '/assets/metadata', { json: { items } });
   }
 
   async addToAlbum(albumId, ids) {

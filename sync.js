@@ -14,10 +14,88 @@ export async function loadConfig() {
   return { settings: { ...DEFAULT_SETTINGS, ...settings }, albums };
 }
 
-// mediaKey -> Immich asset id, for everything this extension uploaded. Stops a photo
-// from being re-uploaded when its Immich checksum differs from Google's dedupKey.
+// Immich asset metadata key under which each copy records the Google Photos item it came
+// from ({mediaKey, dedupKey}). Google's download often differs from its dedupKey, so the
+// checksum can't find earlier copies; this record lets any install of the extension (in
+// another browser, or after a reinstall) find them without downloading again.
+export const RECORD_KEY = 'google-photos';
+
+// ledger: mediaKey -> Immich asset id, for everything this install copied or found.
+// recorded: mediaKeys whose asset already carries the RECORD_KEY record.
 async function loadLedger() {
-  return (await chrome.storage.local.get('ledger')).ledger ?? {};
+  const { ledger = {}, recorded = {} } = await chrome.storage.local.get(['ledger', 'recorded']);
+  return { ledger, recorded };
+}
+
+const MAX_SHIFT_MS = 15 * 3_600_000;
+const QUARTER_HOUR_MS = 15 * 60_000;
+
+// Could an Immich asset (with ms = its capture time) be the copy of Google item `it`? The
+// times mostly agree to the millisecond, but Google and Immich can read a photo's time in
+// different time zones (whole quarter hours apart) and a video's from different tags
+// (minutes apart).
+function couldBeCopy(asset, it) {
+  if (asset.type !== (it.isVideo ? 'VIDEO' : 'IMAGE')) return false;
+  const d = Math.abs(asset.ms - it.takenMs);
+  return d <= MAX_SHIFT_MS && (it.isVideo || d % QUARTER_HOUR_MS === 0);
+}
+
+// Runs fn over list, at most n at a time; stops starting new ones after a failure.
+async function eachLimit(list, n, fn) {
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < list.length) {
+      try {
+        await fn(list[next++]);
+      } catch (err) {
+        failed = true;
+        throw err;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(n, list.length) }, worker));
+}
+
+/**
+ * Find Immich assets whose RECORD_KEY record names one of `items`, by mediaKey or, for the
+ * same photo seen through another album, by dedupKey. Candidates come from a search by
+ * capture time; their records are read closest first.
+ * @returns {Promise<Map<string, {id: string, isTrashed: boolean}>>} mediaKey -> asset
+ */
+async function findRecordedCopies(immich, items) {
+  const found = new Map();
+  if (!items.length) return found;
+  const spans = [];
+  for (const t of items.map((it) => it.takenMs).sort((a, b) => a - b)) {
+    const last = spans.at(-1);
+    if (last && t - MAX_SHIFT_MS <= last[1]) last[1] = t + MAX_SHIFT_MS;
+    else spans.push([t - MAX_SHIFT_MS, t + MAX_SHIFT_MS]);
+  }
+  const assets = [];
+  for (const [from, to] of spans) {
+    for (const a of await immich.searchTaken(new Date(from), new Date(to))) assets.push({ ...a, ms: Date.parse(a.fileCreatedAt) });
+  }
+
+  const records = new Map(); // asset id -> Promise<record | null>
+  const recordOf = (id) => {
+    if (!records.has(id)) {
+      records.set(id, immich.getMetadata(id).then((m) => m.find((x) => x.key === RECORD_KEY)?.value ?? null));
+    }
+    return records.get(id);
+  };
+  await eachLimit(items, 8, async (it) => {
+    const candidates = assets.filter((a) => couldBeCopy(a, it));
+    candidates.sort((a, b) => Math.abs(a.ms - it.takenMs) - Math.abs(b.ms - it.takenMs));
+    for (const a of candidates) {
+      const r = await recordOf(a.id);
+      if (r && (r.mediaKey === it.mediaKey || (it.dedupKey && r.dedupKey === it.dedupKey))) {
+        found.set(it.mediaKey, a);
+        return;
+      }
+    }
+  });
+  return found;
 }
 
 const mb = (n) => `${(n / 1e6).toFixed(1)} MB`;
@@ -54,7 +132,45 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   report.log(`Read "${album.title}" from Google Photos: ${album.items.length} items (${videos} videos)`);
   await report.save(true);
 
-  const ledger = await loadLedger();
+  const { ledger, recorded } = await loadLedger();
+
+  // Writes the RECORD_KEY record onto copies ([{it, assetId}]). Failing is not fatal: this
+  // install's ledger still knows the copies, only other installs won't find them.
+  let recordWarned = false;
+  const record = async (pairs) => {
+    if (!pairs.length) return;
+    const write = async (part) => {
+      const value = (it) => ({ mediaKey: it.mediaKey, dedupKey: it.dedupKey });
+      await immich.setMetadata(part.map(({ it, assetId }) => ({ assetId, key: RECORD_KEY, value: value(it) })));
+      part.forEach(({ it }) => (recorded[it.mediaKey] = 1));
+    };
+    try {
+      for (let i = 0; i < pairs.length; i += 500) {
+        const chunk = pairs.slice(i, i + 500);
+        try {
+          await write(chunk);
+        } catch (err) {
+          // One asset deleted from Immich fails the whole request, so retry one by one.
+          // A deleted asset has nothing to record.
+          if (err.status !== 400) throw err;
+          for (const p of chunk) {
+            try {
+              await write([p]);
+            } catch (e) {
+              if (e.status !== 400) throw e;
+              recorded[p.it.mediaKey] = 1;
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      if (!recordWarned) report.log(`Could not mark copies in Immich for other installs: ${err.message}`);
+      recordWarned = true;
+    }
+    await chrome.storage.local.set({ recorded });
+  };
+
   const status = {};
   const toCheck = [];
   for (const it of album.items) {
@@ -66,7 +182,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   const checks = await immich.bulkCheck(
     toCheck.map((it) => ({ id: it.mediaKey, checksum: dedupKeyToChecksum(it.dedupKey) })),
   );
-  const missing = [];
+  let missing = [];
   for (const it of toCheck) {
     const c = checks.get(it.mediaKey);
     if (c?.action === 'accept') {
@@ -78,6 +194,26 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
       status[it.mediaKey] = { state: 'error', message: `Immich rejected: ${c?.reason ?? 'no result'}` };
     }
   }
+
+  // Copies made from another browser, or before a reinstall.
+  try {
+    const found = await findRecordedCopies(immich, missing);
+    if (found.size) {
+      for (const [mediaKey, asset] of found) {
+        status[mediaKey] = { state: asset.isTrashed ? 'trashed' : 'in-immich', assetId: asset.id };
+        if (asset.isTrashed) continue;
+        ledger[mediaKey] = asset.id;
+        recorded[mediaKey] = 1;
+      }
+      missing = missing.filter((it) => !found.has(it.mediaKey));
+      await chrome.storage.local.set({ ledger, recorded });
+      report.log(`Found ${found.size} ${found.size === 1 ? 'copy' : 'copies'} made from another browser or install`);
+    }
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    report.log(`Could not look for copies made from other installs: ${err.message}`);
+  }
+
   const count = (state) => Object.values(status).filter((x) => x.state === state).length;
   Object.assign(s, { inImmich: count('in-immich'), trashed: count('trashed'), missing: missing.length, failed: count('error') });
   report.log(
@@ -85,6 +221,12 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
       (s.trashed ? `, ${s.trashed} in Immich trash (skipped)` : '') +
       (s.failed ? `, ${s.failed} unreadable` : ''),
   );
+
+  // Copies this install made before copies were marked in Immich.
+  if (!dryRun) {
+    const unmarked = album.items.filter((it) => ledger[it.mediaKey] && !recorded[it.mediaKey]);
+    await record(unmarked.map((it) => ({ it, assetId: ledger[it.mediaKey] })));
+  }
 
   // Upload missing items, oldest first (so an interrupted run leaves no gaps in the past).
   missing.sort((a, b) => a.takenMs - b.takenMs);
@@ -132,6 +274,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
       } else {
         report.log(`Already in Immich: ${file.filename}`);
       }
+      await record([{ it, assetId: res.id }]);
     } catch (err) {
       if (signal?.aborted) throw err; // stopped, not failed: the item is still to copy
       status[it.mediaKey] = { state: 'error', message: err.message };

@@ -30,6 +30,8 @@ videos are both supported.
 - Pick the albums to sync from the shared albums in your Google account, whether shared with
   you or by you. No links to copy; pasting a share link still works too.
 - Deduplication by SHA-1 against your **entire** Immich library, before anything is downloaded.
+- Copies are marked in Immich with the Google item they came from, so the extension in another
+  browser, or after a reinstall, recognises them instead of copying them again.
 - Works alongside an [immich-go](https://github.com/simulot/immich-go) Google Takeout import:
   use Takeout for the bulk history, the extension for everything added afterwards.
 - Uploads missing items **oldest first**, so an interrupted run never leaves gaps.
@@ -90,8 +92,8 @@ cancels the file being copied and skips the remaining albums. Files already copi
 Immich. If a sync is interrupted (Stop, Chrome closed, tab closed), the card says so, and the
 next run continues where it stopped. Automatic sync still runs at its next scheduled time.
 
-**API key permissions:** `asset.upload`, `asset.read`, `album.create`, `album.read`,
-`album.update` (or "All").
+**API key permissions:** `asset.upload`, `asset.read`, `asset.update`, `album.create`,
+`album.read`, `album.update` (or "All").
 
 By default photos already in Immich are also added to the matching Immich album. Untick
 *Also add photos already in Immich to the album* if you'd rather it never touches albums
@@ -115,8 +117,16 @@ for existing photos.
 5. **Mirror.** Uploaded (and optionally existing) assets are added to an Immich album named
    after the Google album.
 
-A small local ledger (`mediaKey → Immich asset id`) stops anything from being re-uploaded if
-a checksum ever differs.
+Google's download often isn't byte for byte the file its `dedupKey` describes, and two
+downloads of the same photo can differ, so the checksum can't be relied on to find earlier
+copies. Two things cover that:
+
+- A local ledger (`mediaKey → Immich asset id`) of everything this browser copied.
+- Each copy's Immich asset metadata, under the key `google-photos`, records the Google item it
+  came from (`{mediaKey, dedupKey}`). For items neither the checksum nor the ledger accounts
+  for, the extension searches Immich for assets taken around the same time and reads their
+  records, so copies made from another browser, or before a reinstall, are found without
+  downloading anything. Copies made before this existed are marked on the next sync.
 
 ## Privacy and permissions
 
@@ -134,7 +144,8 @@ a checksum ever differs.
 - **Chrome must be running** and signed in to Google for background syncs to happen. Sync
   runs at most every 5 minutes.
 - **Matching is by SHA-1.** Photos Google has re-encoded (not "original quality") won't match
-  an Immich copy of the original byte for byte.
+  an Immich copy of the original byte for byte. Only copies the extension made are recognised
+  by their record.
 - One-way only: Google Photos → Immich. Nothing is ever changed or deleted in Google Photos,
   and nothing is deleted from Immich.
 

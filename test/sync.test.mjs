@@ -1,7 +1,7 @@
 // End-to-end runSync against mocked chrome.* APIs, Google Photos and Immich.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runSync } from '../sync.js';
+import { RECORD_KEY, runSync } from '../sync.js';
 import { getLock, requestStop, stateKey } from '../state.js';
 
 const listeners = new Set();
@@ -44,6 +44,9 @@ const albums = {
 };
 
 const uploads = [];
+const assets = new Map(); // Immich: id -> {id, type, fileCreatedAt, isTrashed}
+const metadata = new Map(); // Immich: asset id -> {key: value}
+const metadataWrites = [];
 let onFetch = null; // test hook, called with each url before it is answered
 globalThis.fetch = async (url, init = {}) => {
   url = String(url);
@@ -74,8 +77,25 @@ globalThis.fetch = async (url, init = {}) => {
     });
   }
   if (path === '/assets' && m === 'POST') {
-    uploads.push(init.body.get('filename'));
-    return json({ id: `new-${init.body.get('filename')}`, status: 'created' });
+    const filename = init.body.get('filename');
+    uploads.push(filename);
+    const id = `new-${filename}`;
+    assets.set(id, { id, type: 'IMAGE', fileCreatedAt: init.body.get('fileCreatedAt'), isTrashed: false });
+    return json({ id, status: 'created' });
+  }
+  if (path === '/search/metadata') {
+    const q = JSON.parse(init.body);
+    const inRange = (a) => Date.parse(q.takenAfter) <= Date.parse(a.fileCreatedAt) && Date.parse(a.fileCreatedAt) <= Date.parse(q.takenBefore);
+    return json({ assets: { items: [...assets.values()].filter(inRange), nextPage: null } });
+  }
+  const meta = path.match(/^\/assets\/([^/]+)\/metadata$/);
+  if (meta && m === 'GET') return json(Object.entries(metadata.get(meta[1]) ?? {}).map(([key, value]) => ({ key, value })));
+  if (path === '/assets/metadata' && m === 'PUT') {
+    const { items } = JSON.parse(init.body);
+    if (items.some((x) => !assets.has(x.assetId))) return new Response('{"message":"Not found or no asset.update access"}', { status: 400 });
+    items.forEach((x) => metadata.set(x.assetId, { ...metadata.get(x.assetId), [x.key]: x.value }));
+    metadataWrites.push(...items);
+    return json(items);
   }
   if (path === '/albums' && m === 'GET') return json([]);
   if (path === '/albums' && m === 'POST') return json({ id: 'alb1', albumName: JSON.parse(init.body).albumName });
@@ -111,6 +131,8 @@ test('sync copies oldest first and records progress and stats', async () => {
   assert.deepEqual(s.totals, { uploadedFiles: 2, uploadedBytes: 5000 });
   assert.equal(s.lastSync.files, 2);
   assert.ok(s.log.some((l) => l.includes('Copied IMG_2.jpg')));
+  assert.deepEqual(metadata.get('new-IMG_2.jpg'), { [RECORD_KEY]: { mediaKey: key(2), dedupKey: 'dedup2' } }, 'copies are marked in Immich');
+  assert.deepEqual(Object.keys(local.get('recorded')), [key(2), key(3)]);
 
   const phases = snapshots.map((o) => o[stateKey(ALBUM_URL)]?.phase).filter(Boolean);
   const order = [...new Set(phases)];
@@ -159,4 +181,61 @@ test('a stop request for an earlier run is ignored', async () => {
   const run = await runSync({ urls: [ALBUM_URL], dryRun: true });
   assert.equal(run.stopped, undefined);
   assert.equal(local.get(stateKey(ALBUM_URL)).phase, 'done');
+});
+
+test('another install finds the copies by their mark in Immich instead of downloading', async () => {
+  local.delete('ledger');
+  local.delete('recorded');
+  uploads.length = 0;
+  let downloads = 0;
+  onFetch = (url) => void (/=dv?$/.test(url) && downloads++);
+  await runSync({ urls: [ALBUM_URL] });
+  onFetch = null;
+
+  assert.equal(downloads, 0);
+  assert.deepEqual(uploads, []);
+  const s = local.get(stateKey(ALBUM_URL));
+  assert.deepEqual([s.inImmich, s.missing], [3, 0]);
+  assert.ok(s.log.some((l) => l.includes('Found 2 copies made from another browser or install')));
+  assert.equal(local.get('ledger')[key(2)], 'new-IMG_2.jpg', 'remembered locally from then on');
+});
+
+test('a copy is found despite time zone and video time differences, but only by its mark', async () => {
+  const url = 'https://photos.google.com/share/AF1Qipalbum3';
+  const T = Date.UTC(2026, 5, 1, 12);
+  const video = (n, ms) => [...item(n, ms), { 76647426: [5000] }];
+  albums[url] = albumHtml([item(8, T), video(9, T), item(10, T)], 'Trip');
+  const add = (id, type, ms, mark) => {
+    assets.set(id, { id, type, fileCreatedAt: new Date(ms).toISOString(), isTrashed: false });
+    metadata.set(id, { [RECORD_KEY]: mark });
+  };
+  add('decoy', 'IMAGE', T, { mediaKey: 'someone-else', dedupKey: 'other' });
+  add('photo8', 'IMAGE', T + 3 * 3_600_000, { mediaKey: key(8), dedupKey: 'dedup8' });
+  add('video9', 'VIDEO', T + 7 * 60_000, { mediaKey: key(9), dedupKey: 'dedup9' });
+  add('photo10', 'IMAGE', T + 7 * 60_000, { mediaKey: key(10), dedupKey: 'dedup10' });
+
+  await runSync({ urls: [url], dryRun: true });
+  const s = local.get(stateKey(url));
+  assert.deepEqual([s.inImmich, s.missing], [2, 1], 'a photo 7 minutes off is not taken for the copy');
+  assert.equal(local.get('ledger')[key(8)], 'photo8');
+  assert.equal(local.get('ledger')[key(9)], 'video9');
+});
+
+test('copies made before marking are marked on the next sync, skipping deleted ones', async () => {
+  metadata.delete('new-IMG_2.jpg');
+  local.set('ledger', { [key(2)]: 'new-IMG_2.jpg', [key(3)]: 'deleted-in-immich' });
+  local.set('recorded', {});
+  metadataWrites.length = 0;
+
+  await runSync({ urls: [ALBUM_URL], dryRun: true });
+  assert.equal(metadataWrites.length, 0, 'a check changes nothing in Immich');
+
+  await runSync({ urls: [ALBUM_URL] });
+  assert.deepEqual(metadata.get('new-IMG_2.jpg'), { [RECORD_KEY]: { mediaKey: key(2), dedupKey: 'dedup2' } });
+  assert.deepEqual(Object.keys(local.get('recorded')).sort(), [key(2), key(3)].sort(), 'the deleted one is not retried');
+  assert.ok(!local.get(stateKey(ALBUM_URL)).log.some((l) => l.includes('Could not mark')));
+
+  metadataWrites.length = 0;
+  await runSync({ urls: [ALBUM_URL] });
+  assert.equal(metadataWrites.length, 0, 'marked once');
 });
