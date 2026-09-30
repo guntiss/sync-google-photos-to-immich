@@ -124,21 +124,21 @@ function meterStop(m) {
 
 /**
  * Sync (or with dryRun, only check) one album, reporting progress into report.state:
- *   phase: listing -> checking -> uploading -> album -> done (or 'stopped' / 'error', set by runSync)
+ *   phase: listing -> checking -> uploading -> locations -> album -> done (or 'stopped' / 'error', set by runSync)
  *   title / albumKey, total / inImmich / trashed / missing / failed,
  *   run: {...this run's stats}, totals: {...all time}
  * @returns {{album, status: Record<string, {state: string, assetId?: string, message?: string}>}}
  *   state: 'in-immich' | 'trashed' | 'missing' | 'uploaded' | 'error'
  * Throws when signal aborts; items copied until then stay counted.
  */
-export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = false, limit = Infinity, signal } = {}) {
+export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = false, locationsOnly = false, limit = Infinity, signal } = {}) {
   const s = report.state;
   Object.assign(s, {
     phase: 'listing',
-    mode: dryRun ? 'check' : 'sync',
+    mode: dryRun ? 'check' : locationsOnly ? 'locations' : 'sync',
     message: null,
     listed: 0,
-    run: { startedAt: Date.now(), finishedAt: null, toUpload: 0, done: 0, uploadedFiles: 0, uploadedBytes: 0, failed: 0, active: [], download: newMeter(), upload: newMeter() },
+    run: { startedAt: Date.now(), finishedAt: null, locations: 0, locationsTotal: 0, locationsDone: 0, locationsError: null, toUpload: 0, done: 0, uploadedFiles: 0, uploadedBytes: 0, failed: 0, active: [], download: newMeter(), upload: newMeter() },
   });
   await report.save(true);
 
@@ -245,7 +245,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   );
 
   // Copies this install made before copies were marked in Immich.
-  if (!dryRun) {
+  if (!dryRun && !locationsOnly) {
     const unmarked = album.items.filter((it) => ledger[it.mediaKey] && !recorded[it.mediaKey]);
     await record(unmarked.map((it) => ({ it, assetId: ledger[it.mediaKey] })));
   }
@@ -253,7 +253,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   // Upload missing items, oldest first (so an interrupted run leaves few gaps in the past),
   // PARALLEL_COPIES at a time.
   missing.sort((a, b) => a.takenMs - b.takenMs);
-  const queue = dryRun ? [] : missing.slice(0, limit);
+  const queue = dryRun || locationsOnly ? [] : missing.slice(0, limit);
   s.run.toUpload = queue.length;
   if (queue.length) {
     s.phase = 'uploading';
@@ -330,17 +330,20 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   await eachLimit(queue, PARALLEL_COPIES, copy);
 
   // Google's download of a shared item mostly has its GPS tags stripped, so Immich would have
-  // no location for the copy. Give it the one Google Photos shows, for new copies and for
-  // earlier ones, but never replace a location Immich already has (a Takeout import, or one
-  // set by hand). Failing is not fatal: the items not done are tried again next sync.
+  // no location for the copy. Give it the one Google Photos shows, but never replace a
+  // location Immich already has (a Takeout import, or one set by hand). A sync does this for
+  // the items it just copied; "Sync locations" (locationsOnly) does it for every item not
+  // looked at yet, which takes a while for a big album. Failing is not fatal: the items not
+  // done are tried again next time.
   signal?.throwIfAborted();
-  const wantLocation = album.items.filter(
-    (it) => ['in-immich', 'uploaded'].includes(status[it.mediaKey]?.state) && !located[it.mediaKey],
-  );
+  const wantLocation = album.items.filter((it) => {
+    const st = status[it.mediaKey]?.state;
+    return (st === 'uploaded' || (locationsOnly && st === 'in-immich')) && !located[it.mediaKey];
+  });
   if (!dryRun && wantLocation.length) {
     s.phase = 'locations';
+    s.run.locationsTotal = wantLocation.length;
     await report.save(true);
-    let set = 0;
     try {
       for (let i = 0; i < wantLocation.length; i += LOCATION_CHUNK) {
         signal?.throwIfAborted();
@@ -356,7 +359,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
                 const asset = await immich.getAsset(assetId);
                 if (asset.exifInfo?.latitude == null) {
                   await immich.updateAsset(assetId, place);
-                  set++;
+                  s.run.locations++;
                 }
               }
             } catch (err) {
@@ -368,37 +371,44 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
         } finally {
           await chrome.storage.local.set({ located });
         }
+        s.run.locationsDone = Math.min(i + LOCATION_CHUNK, wantLocation.length);
+        report.save();
       }
     } catch (err) {
       if (signal?.aborted) throw err;
+      s.run.locationsError = err.message;
       report.log(`Could not copy locations to Immich: ${err.message}`);
     }
-    if (set) report.log(`Copied the location of ${set} ${set === 1 ? 'item' : 'items'} from Google Photos to Immich`);
+    const n = s.run.locations;
+    if (n || locationsOnly) report.log(`Copied the location of ${n} ${n === 1 ? 'item' : 'items'} from Google Photos to Immich`);
   }
 
   // Mirror into the Immich album.
-  signal?.throwIfAborted();
-  s.phase = 'album';
-  await report.save(true);
-  const albumName = album.title;
-  const wanted = Object.values(status)
-    .filter((x) => x.assetId && (x.state === 'uploaded' || (settings.addExisting && x.state === 'in-immich')))
-    .map((x) => x.assetId);
-  let immichAlbum = (await immich.listAlbums()).find((a) => a.albumName === albumName);
-  const inAlbum = immichAlbum ? await immich.albumAssetIds(immichAlbum.id) : new Set();
-  const toAdd = [...new Set(wanted)].filter((id) => !inAlbum.has(id));
-  if (toAdd.length && !dryRun) {
-    immichAlbum ??= await immich.createAlbum(albumName);
-    const added = await immich.addToAlbum(immichAlbum.id, toAdd);
-    report.log(`Added ${added} item(s) to Immich album "${albumName}"`);
-  } else if (toAdd.length) {
-    report.log(`${toAdd.length} item(s) would be added to Immich album "${albumName}"`);
+  if (!locationsOnly) {
+    signal?.throwIfAborted();
+    s.phase = 'album';
+    await report.save(true);
+    const albumName = album.title;
+    const wanted = Object.values(status)
+      .filter((x) => x.assetId && (x.state === 'uploaded' || (settings.addExisting && x.state === 'in-immich')))
+      .map((x) => x.assetId);
+    let immichAlbum = (await immich.listAlbums()).find((a) => a.albumName === albumName);
+    const inAlbum = immichAlbum ? await immich.albumAssetIds(immichAlbum.id) : new Set();
+    const toAdd = [...new Set(wanted)].filter((id) => !inAlbum.has(id));
+    if (toAdd.length && !dryRun) {
+      immichAlbum ??= await immich.createAlbum(albumName);
+      const added = await immich.addToAlbum(immichAlbum.id, toAdd);
+      report.log(`Added ${added} item(s) to Immich album "${albumName}"`);
+    } else if (toAdd.length) {
+      report.log(`${toAdd.length} item(s) would be added to Immich album "${albumName}"`);
+    }
   }
 
-  Object.assign(s, { phase: 'done', immichAlbum: albumName });
+  Object.assign(s, { phase: 'done' });
+  if (!locationsOnly) s.immichAlbum = album.title;
   s.run.finishedAt = Date.now();
-  s[dryRun ? 'lastCheckAt' : 'lastSyncAt'] = s.run.finishedAt;
-  if (!dryRun) {
+  if (!locationsOnly) s[dryRun ? 'lastCheckAt' : 'lastSyncAt'] = s.run.finishedAt;
+  if (!dryRun && !locationsOnly) {
     const r = s.run;
     s.lastSync = {
       files: r.uploadedFiles, bytes: r.uploadedBytes, failed: r.failed, durationMs: r.finishedAt - r.startedAt,
@@ -424,13 +434,13 @@ function badgeProgress(state) {
 }
 
 /**
- * Run a check or sync over the given albums (default: all configured) under the
- * shared lock. Throws BusyError if another sync is running. A stop request
+ * Run a check, a sync, or (locationsOnly) a locations-only sync over the given albums
+ * (default: all configured) under the shared lock. Throws BusyError if another sync is running. A stop request
  * (state.js requestStop) ends the run: the current album is marked 'stopped' and the
  * rest are left as they were, and the result has stopped: true.
- * @param {{urls?: string[], dryRun?: boolean, trigger?: 'manual'|'schedule', onAlbum?: (url: string, r: object) => void}} opts
+ * @param {{urls?: string[], dryRun?: boolean, locationsOnly?: boolean, trigger?: 'manual'|'schedule', onAlbum?: (url: string, r: object) => void}} opts
  */
-export async function runSync({ urls, dryRun = false, trigger = 'manual', onAlbum } = {}) {
+export async function runSync({ urls, dryRun = false, locationsOnly = false, trigger = 'manual', onAlbum } = {}) {
   const { settings, albums } = await loadConfig();
   urls ??= albums;
   if (!settings.immichUrl || !settings.apiKey) throw new Error('Connect to Immich first (Settings).');
@@ -439,10 +449,10 @@ export async function runSync({ urls, dryRun = false, trigger = 'manual', onAlbu
     throw new Error(`No access to ${origin} yet. Open Settings and click Save to grant it.`);
   }
 
-  const lock = await acquireLock({ trigger, mode: dryRun ? 'check' : 'sync' });
+  const lock = await acquireLock({ trigger, mode: dryRun ? 'check' : locationsOnly ? 'locations' : 'sync' });
   if (!lock) throw new BusyError('Another sync is already running.');
   const { release, signal } = lock;
-  const lastRun = { at: Date.now(), trigger, dryRun, results: [] };
+  const lastRun = { at: Date.now(), trigger, dryRun, locationsOnly, results: [] };
   try {
     const immich = new Immich(settings.immichUrl, settings.apiKey, { signal });
     await immich.me(); // fail fast on a bad URL / key
@@ -450,7 +460,7 @@ export async function runSync({ urls, dryRun = false, trigger = 'manual', onAlbu
       signal.throwIfAborted();
       const report = await createReporter(url, { onSave: badgeProgress });
       try {
-        const r = await syncAlbum(url, settings, immich, report, { dryRun, signal });
+        const r = await syncAlbum(url, settings, immich, report, { dryRun, locationsOnly, signal });
         onAlbum?.(url, r);
         const { title, run } = report.state;
         lastRun.results.push({ url, title, percent: percentDone(report.state), uploaded: run.uploadedFiles, bytes: run.uploadedBytes, failed: run.failed });
@@ -459,7 +469,7 @@ export async function runSync({ urls, dryRun = false, trigger = 'manual', onAlbu
           const { title, run } = report.state;
           report.state.phase = 'stopped';
           run.active = [];
-          report.log(`${dryRun ? 'Check' : 'Sync'} stopped` + (run.uploadedFiles ? ` after copying ${run.uploadedFiles} (${mb(run.uploadedBytes)})` : ''));
+          report.log(`${dryRun ? 'Check' : locationsOnly ? 'Location sync' : 'Sync'} stopped` + (run.uploadedFiles ? ` after copying ${run.uploadedFiles} (${mb(run.uploadedBytes)})` : ''));
           await report.save(true);
           lastRun.results.push({ url, title, stopped: true, uploaded: run.uploadedFiles, bytes: run.uploadedBytes, failed: run.failed });
           throw err;

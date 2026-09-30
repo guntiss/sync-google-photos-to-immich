@@ -178,44 +178,67 @@ test('sync copies oldest first and records progress and stats', async () => {
   assert.equal(session.size, 0, 'lock released');
 });
 
-test('the location Google Photos shows is copied onto the copies, once, and never over one Immich has', async () => {
-  // Run 1 (above) copied items 2 and 3; only item 2 has a location.
+test('a sync copies the location Google Photos shows onto the items it copied, once', async () => {
+  // Run 1 (above) copied items 2 and 3; only item 2 has a location. Item 1 was already in Immich.
   assert.deepEqual(locationWrites, [['new-IMG_2.jpg', { latitude: 56.7985694, longitude: 24.1725 }]]);
   const s = local.get(stateKey(ALBUM_URL));
+  assert.equal(s.run.locations, 1);
   assert.ok(s.log.some((l) => l.includes('Copied the location of 1 item from Google Photos to Immich')));
-  assert.deepEqual(Object.keys(local.get('located')).sort(), [key(1), key(2), key(3)].sort());
+  assert.deepEqual(Object.keys(local.get('located')).sort(), [key(2), key(3)].sort());
 
   let asked = 0;
   onFetch = (url) => void (url.includes('batchexecute') && asked++);
   await runSync({ urls: [ALBUM_URL] });
-  assert.equal(asked, 0, 'not asked for again');
+  onFetch = null;
+  assert.equal(asked, 0, 'nothing new was copied, so nothing is asked');
+});
 
-  // A location Immich already has (a Takeout import, or set by hand) is left alone.
-  googleLocations.set(key(3), [10000000, 20000000]);
-  assets.get('new-IMG_3.jpg').exifInfo = { latitude: 1, longitude: 2 };
+test('Sync locations sets locations on items already in Immich, without copying or touching albums, and never over an existing one', async () => {
   local.set('located', {});
   locationWrites.length = 0;
-  await runSync({ urls: [ALBUM_URL], dryRun: true });
-  assert.equal(asked, 0, 'a check does not ask either');
-  await runSync({ urls: [ALBUM_URL] });
+  delete assets.get('new-IMG_2.jpg').exifInfo;
+  googleLocations.set(key(3), [10000000, 20000000]);
+  assets.get('new-IMG_3.jpg').exifInfo = { latitude: 1, longitude: 2 }; // Takeout import, or set by hand
+  const lastSyncAt = local.get(stateKey(ALBUM_URL)).lastSyncAt;
+  uploads.length = 0;
+  const calls = [];
+  onFetch = (url, init) => void calls.push(`${init.method ?? 'GET'} ${url}`);
+
+  await runSync({ urls: [ALBUM_URL], dryRun: true, locationsOnly: true });
+  assert.equal(locationWrites.length, 0, 'a check changes nothing');
+
+  const run = await runSync({ urls: [ALBUM_URL], locationsOnly: true });
   onFetch = null;
-  assert.deepEqual(locationWrites, [], 'item 2 got its location earlier, and item 3 already has one');
+  assert.equal(run.locationsOnly, true);
+  assert.deepEqual(locationWrites, [['new-IMG_2.jpg', { latitude: 56.7985694, longitude: 24.1725 }]]);
+  assert.deepEqual(uploads, []);
+  assert.ok(!calls.some((c) => /=dv?$/.test(c) || c.includes('/albums')), 'nothing downloaded, no album work');
+  const s = local.get(stateKey(ALBUM_URL));
+  assert.equal(s.phase, 'done');
+  assert.equal(s.mode, 'locations');
+  assert.equal(s.run.locations, 1);
+  assert.equal(s.run.locationsTotal, 3, 'items 1, 2 and 3 were looked at');
+  assert.equal(s.lastSyncAt, lastSyncAt, 'not counted as a sync');
+  assert.deepEqual(Object.keys(local.get('located')).sort(), [key(1), key(2), key(3)].sort());
   googleLocations.delete(key(3));
 });
 
-test('failing to get locations does not fail the sync, and is tried again next time', async () => {
+test('failing to get locations does not fail the run, and is tried again next time', async () => {
   local.set('located', {});
   locationWrites.length = 0;
+  delete assets.get('new-IMG_2.jpg').exifInfo;
   googleLocationsFail = true;
-  const run = await runSync({ urls: [ALBUM_URL] });
+  const run = await runSync({ urls: [ALBUM_URL], locationsOnly: true });
   googleLocationsFail = false;
   assert.equal(run.results[0].error, undefined);
   const s = local.get(stateKey(ALBUM_URL));
   assert.equal(s.phase, 'done');
+  assert.match(s.run.locationsError, /batchexecute fDcn4b failed: HTTP 403/);
   assert.ok(s.log.some((l) => l.includes('Could not copy locations to Immich: batchexecute fDcn4b failed: HTTP 403')));
   assert.deepEqual(local.get('located'), {});
 
-  await runSync({ urls: [ALBUM_URL] });
+  await runSync({ urls: [ALBUM_URL], locationsOnly: true });
+  assert.deepEqual(locationWrites, [['new-IMG_2.jpg', { latitude: 56.7985694, longitude: 24.1725 }]]);
   assert.deepEqual(Object.keys(local.get('located')).sort(), [key(1), key(2), key(3)].sort());
 });
 

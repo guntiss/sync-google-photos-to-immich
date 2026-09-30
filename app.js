@@ -79,7 +79,7 @@ function showBanner(msg, kind = 'err') {
   b.textContent = msg ?? '';
 }
 
-async function start({ urls, dryRun }) {
+async function start({ urls, dryRun = false, locationsOnly = false }) {
   if (busy()) return;
   showBanner(null);
   localRun = true;
@@ -88,6 +88,7 @@ async function start({ urls, dryRun }) {
     await runSync({
       urls,
       dryRun,
+      locationsOnly,
       onAlbum: (url, r) => {
         results.set(url, r);
         const c = cards.get(url);
@@ -125,13 +126,14 @@ function createCard(url) {
     status: q('.status'), stats: q('.stats'),
     photos: q('.photos'), filter: q('.filter'), grid: q('.grid'), note: q('.photos-note'),
     log: q('.log'),
-    buttons: [...node.querySelectorAll('[data-action=check], [data-action=sync]')],
+    buttons: [...node.querySelectorAll('[data-action=check], [data-action=sync], [data-action=locations]')],
     stop: q('[data-action=stop]'),
   };
   c.src.href = url;
   c.src.textContent = url.replace(/^https:\/\//, '');
   q('[data-action=check]').onclick = () => start({ urls: [url], dryRun: true });
-  q('[data-action=sync]').onclick = () => start({ urls: [url], dryRun: false });
+  q('[data-action=sync]').onclick = () => start({ urls: [url] });
+  q('[data-action=locations]').onclick = () => start({ urls: [url], locationsOnly: true });
   c.stop.onclick = stop;
   q('[data-action=remove]').onclick = () => removeAlbum(url);
   q('[data-action=export]').onclick = () => exportList(url);
@@ -156,7 +158,11 @@ function describe(s, running, interrupted) {
       case 'checking':
         return { text: `Comparing ${plural(s.total, 'item')} with Immich…` };
       case 'locations':
-        return { text: 'Copying locations from Google Photos…' };
+        return {
+          text: s.mode === 'locations' && r.locationsTotal
+            ? `Copying locations from Google Photos… ${num(r.locationsDone)} of ${num(r.locationsTotal)}`
+            : 'Copying locations from Google Photos…',
+        };
       case 'album':
         return { text: 'Updating the Immich album…' };
       case 'uploading': {
@@ -186,8 +192,19 @@ function describe(s, running, interrupted) {
   if (s.phase === 'error') return { text: s.message, tone: 'err' };
   if (s.phase === 'stopped') {
     if (s.mode === 'check') return { text: 'Check stopped. Click Check to run it again.', tone: 'warn' };
+    if (s.mode === 'locations') {
+      return { text: 'Location sync stopped. Click Sync locations to continue where it stopped.', tone: 'warn' };
+    }
     const copied = s.run?.uploadedFiles ? ` after copying ${plural(s.run.uploadedFiles, 'item')}` : '';
     return { text: `Sync stopped${copied}. Click Sync to continue where it stopped.`, tone: 'warn' };
+  }
+  if (s.mode === 'locations' && s.run) {
+    const r = s.run;
+    if (r.locationsError) return { text: `Could not sync all locations: ${r.locationsError}`, tone: 'err' };
+    return {
+      text: `Locations synced. Set the location of ${plural(r.locations, 'item')} in ${fmtDuration(r.finishedAt - r.startedAt)}.`,
+      tone: 'ok',
+    };
   }
   if (s.failed) return { text: `${plural(s.failed, 'item')} could not be copied. See the activity log.`, tone: 'err' };
   if (s.missing) {
@@ -639,7 +656,7 @@ function renderOverview() {
 
   const off = busy() || !configured() || !config.albums.length;
   const running = isLockActive(lock);
-  for (const id of ['syncAll', 'checkAll']) {
+  for (const id of ['syncAll', 'locationsAll', 'checkAll']) {
     $(id).disabled = off;
     $(id).hidden = running;
   }
@@ -648,7 +665,7 @@ function renderOverview() {
   const minutes = Number(config.settings.intervalMinutes);
   const parts = [];
   if (running) {
-    const what = lock.mode === 'check' ? 'Check' : 'Sync';
+    const what = { check: 'Check', locations: 'Location sync' }[lock.mode] ?? 'Sync';
     if (stopping()) parts.push(`Stopping the ${what.toLowerCase()}…`);
     else parts.push(lock.trigger === 'schedule' ? `Automatic ${what.toLowerCase()} running…` : `${what} running…`);
   }
@@ -657,7 +674,8 @@ function renderOverview() {
     parts.push(`Auto-sync ${every}${alarm ? `, next at ${clock(alarm.scheduledTime)}` : ''}`);
   } else parts.push('Auto-sync off');
   if (lastRun) {
-    const what = `${lastRun.trigger === 'schedule' ? 'automatic' : 'manual'} ${lastRun.dryRun ? 'check' : 'sync'}`;
+    const kind = lastRun.dryRun ? 'check' : lastRun.locationsOnly ? 'location sync' : 'sync';
+    const what = `${lastRun.trigger === 'schedule' ? 'automatic' : 'manual'} ${kind}`;
     const bad = lastRun.error || lastRun.results?.some((r) => r.error || r.failed);
     parts.push(`last ${what} ${ago(lastRun.at)}${bad ? ' (with errors)' : lastRun.stopped ? ' (stopped)' : ''}`);
   }
@@ -764,7 +782,8 @@ $('settingsForm').onsubmit = async (e) => {
 $('cancelSettings').onclick = () => $('settings').close();
 $('openSettings').onclick = openSettings;
 $('conn').onclick = openSettings;
-$('syncAll').onclick = () => start({ dryRun: false });
+$('syncAll').onclick = () => start({});
+$('locationsAll').onclick = () => start({ locationsOnly: true });
 $('checkAll').onclick = () => start({ dryRun: true });
 $('stopSync').onclick = stop;
 
