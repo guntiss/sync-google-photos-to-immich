@@ -57,6 +57,6 @@ including the Limited Use requirements.
 ## Contact
 
 Questions or problems: open an issue at
-<https://github.com/guntiss/gphotos-immich-extension/issues>.
+<https://github.com/guntiss/sync-google-photos-to-immich/issues>.
 
 Changes to this policy are published in this file, and its history is in the repository.

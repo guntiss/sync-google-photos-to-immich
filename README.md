@@ -12,6 +12,12 @@ videos are both supported.
 
 ![Extension page: one album syncing in the background, one up to date, one with new photos](docs/screenshots/overview.png)
 
+## Why not just Google Takeout?
+
+Google Takeout doesn't export photos that other people added to a shared album, so a Takeout
+import leaves those out of Immich. This extension syncs them too: it reads the album as
+Google Photos shows it, including everyone's contributions, and copies whatever Immich is missing.
+
 ## Why an extension?
 
 - **No server, no backend.** Nothing to host, deploy, secure or keep running. The extension
@@ -32,6 +38,7 @@ videos are both supported.
 - Deduplication by SHA-1 against your **entire** Immich library, before anything is downloaded.
 - Copies are marked in Immich with the Google item they came from, so the extension in another
   browser, or after a reinstall, recognises them instead of copying them again.
+- Includes photos other people added to a shared album, which Google Takeout doesn't export.
 - Works alongside an [immich-go](https://github.com/simulot/immich-go) Google Takeout import:
   use Takeout for the bulk history, the extension for everything added afterwards.
 - Copies missing items **oldest first**, three at a time, so an interrupted run leaves no gaps
