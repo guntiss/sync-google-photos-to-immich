@@ -47,8 +47,9 @@ Google Photos shows it, including everyone's contributions, and copies whatever 
 - Photos and videos; originals are downloaded, not thumbnails.
 - Keeps locations. Google strips the GPS tags from most downloads, so the extension reads
   where each item was taken from Google Photos and sets it in Immich. A sync does this for the
-  items it copies; **Sync locations** does it for everything already in Immich, which takes a
-  while on a big album, so run it when you need it. A location Immich already has is never replaced.
+  items it copies; **Sync locations** does it for everything already in Immich. Immich is
+  asked first which items lack a location, so Google Photos is only asked about those. A
+  location Immich already has is never replaced.
 - Per-album progress: percentage in Immich, the files being copied, download progress,
   speed and time left. It works for background syncs too, and the toolbar icon shows the percentage.
 - Stats: items in Immich, still to copy, failed, and files and bytes copied per sync and in total.

@@ -65,15 +65,10 @@ async function eachLimit(list, n, fn) {
 // Items downloaded and uploaded at the same time. Each is held in memory while in flight.
 const PARALLEL_COPIES = 3;
 
-/**
- * Find Immich assets whose RECORD_KEY record names one of `items`, by mediaKey or, for the
- * same photo seen through another album, by dedupKey. Candidates come from a search by
- * capture time; their records are read closest first.
- * @returns {Promise<Map<string, {id: string, isTrashed: boolean}>>} mediaKey -> asset
- */
-async function findRecordedCopies(immich, items) {
-  const found = new Map();
-  if (!items.length) return found;
+// Immich assets captured near any of `items` (within the largest clock shift), trashed ones
+// included, each with ms = its capture time. Nearby times are searched as one span, so this
+// is a few requests however many items there are.
+async function searchNear(immich, items) {
   const spans = [];
   for (const t of items.map((it) => it.takenMs).sort((a, b) => a - b)) {
     const last = spans.at(-1);
@@ -84,6 +79,19 @@ async function findRecordedCopies(immich, items) {
   for (const [from, to] of spans) {
     for (const a of await immich.searchTaken(new Date(from), new Date(to))) assets.push({ ...a, ms: Date.parse(a.fileCreatedAt) });
   }
+  return assets;
+}
+
+/**
+ * Find Immich assets whose RECORD_KEY record names one of `items`, by mediaKey or, for the
+ * same photo seen through another album, by dedupKey. Candidates come from a search by
+ * capture time; their records are read closest first.
+ * @returns {Promise<Map<string, {id: string, isTrashed: boolean}>>} mediaKey -> asset
+ */
+async function findRecordedCopies(immich, items) {
+  const found = new Map();
+  if (!items.length) return found;
+  const assets = await searchNear(immich, items);
 
   const records = new Map(); // asset id -> Promise<record | null>
   const recordOf = (id) => {
@@ -336,12 +344,26 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   // looked at yet, which takes a while for a big album. Failing is not fatal: the items not
   // done are tried again next time.
   signal?.throwIfAborted();
-  const wantLocation = album.items.filter((it) => {
+  let wantLocation = album.items.filter((it) => {
     const st = status[it.mediaKey]?.state;
     return (st === 'uploaded' || (locationsOnly && st === 'in-immich')) && !located[it.mediaKey];
   });
   if (!dryRun && wantLocation.length) {
     s.phase = 'locations';
+    await report.save(true);
+    // Ask Immich first which of them lack a location, so Google is only asked about those
+    // (and not again after a reinstall, or by another install, that has no `located`). An item
+    // Immich gave no details for is still asked about, as before.
+    try {
+      const hasLocation = new Map((await searchNear(immich, wantLocation)).filter((a) => a.exifInfo).map((a) => [a.id, a.exifInfo.latitude != null]));
+      const have = wantLocation.filter((it) => hasLocation.get(status[it.mediaKey].assetId) === true);
+      have.forEach((it) => (located[it.mediaKey] = 1));
+      if (have.length) await chrome.storage.local.set({ located });
+      wantLocation = wantLocation.filter((it) => !have.includes(it));
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      report.log(`Could not check which items in Immich lack a location: ${err.message}`);
+    }
     s.run.locationsTotal = wantLocation.length;
     await report.save(true);
     try {
