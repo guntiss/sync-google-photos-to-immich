@@ -134,6 +134,10 @@ test('sync copies oldest first and records progress and stats', async () => {
   assert.equal(s.inImmich, 3);
   assert.deepEqual(s.totals, { uploadedFiles: 2, uploadedBytes: 5000 });
   assert.equal(s.lastSync.files, 2);
+  assert.equal(s.lastSync.download.bytes, 5000);
+  assert.equal(s.lastSync.upload.bytes, 5000);
+  assert.equal(s.run.download.active, 0, 'meters are stopped when the run ends');
+  assert.equal(s.run.upload.since, null);
   assert.ok(s.log.some((l) => l.includes('Copied IMG_2.jpg')));
   assert.deepEqual(metadata.get('new-IMG_2.jpg'), { [RECORD_KEY]: { mediaKey: key(2), dedupKey: 'dedup2' } }, 'copies are marked in Immich');
   assert.deepEqual(Object.keys(local.get('recorded')).sort(), [key(2), key(3)]);

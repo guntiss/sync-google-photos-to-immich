@@ -35,6 +35,12 @@ function fmtDuration(ms) {
   return `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
+// Average speed of a transfer meter ({bytes, ms, since}), counting a stretch still in progress.
+function fmtSpeed(m) {
+  const ms = (m?.ms ?? 0) + (m?.since ? Date.now() - m.since : 0);
+  return m?.bytes && ms >= 500 ? `${fmtBytes(m.bytes / (ms / 1000))}/s` : '—';
+}
+
 function ago(ms) {
   const s = (Date.now() - ms) / 1000;
   if (s < 60) return 'just now';
@@ -229,15 +235,18 @@ function updateCard(url) {
   const r = s?.run;
   const last = s?.lastSync;
   const stat = (k, v) => el('div', {}, el('dt', {}, k), el('dd', {}, v));
+  const showRun = running && s.phase === 'uploading';
   c.stats.replaceChildren(
     ...(s?.total
       ? [
           stat('In Immich', `${num(s.total - s.missing - s.failed)} of ${num(s.total)}`),
           stat('To copy', num(s.missing)),
           stat('Failed', num(s.failed)),
-          running && s.phase === 'uploading'
+          showRun
             ? stat('Copied this run', `${plural(r.uploadedFiles, 'file')} · ${fmtBytes(r.uploadedBytes)}`)
             : stat('Last sync copied', last ? `${plural(last.files, 'file')} · ${fmtBytes(last.bytes)}` : '—'),
+          stat('Avg download', fmtSpeed(showRun ? r.download : last?.download)),
+          stat('Avg upload', fmtSpeed(showRun ? r.upload : last?.upload)),
           stat('Copied all time', `${plural(s.totals.uploadedFiles, 'file')} · ${fmtBytes(s.totals.uploadedBytes)}`),
           stat('Last synced', s.lastSyncAt ? ago(s.lastSyncAt) : s.lastCheckAt ? `never (checked ${ago(s.lastCheckAt)})` : 'never'),
         ]

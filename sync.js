@@ -104,6 +104,20 @@ async function findRecordedCopies(immich, items) {
 
 const mb = (n) => `${(n / 1e6).toFixed(1)} MB`;
 
+// A transfer meter times the stretches when at least one transfer is in flight, so with
+// several copies at once bytes / ms is the overall speed, not one connection's.
+// {bytes, ms, active, since}: since is set while active > 0.
+const newMeter = () => ({ bytes: 0, ms: 0, active: 0, since: null });
+function meterStart(m) {
+  if (m.active++ === 0) m.since = Date.now();
+}
+function meterStop(m) {
+  if (--m.active === 0) {
+    m.ms += Date.now() - m.since;
+    m.since = null;
+  }
+}
+
 /**
  * Sync (or with dryRun, only check) one album, reporting progress into report.state:
  *   phase: listing -> checking -> uploading -> album -> done (or 'stopped' / 'error', set by runSync)
@@ -120,7 +134,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
     mode: dryRun ? 'check' : 'sync',
     message: null,
     listed: 0,
-    run: { startedAt: Date.now(), finishedAt: null, toUpload: 0, done: 0, uploadedFiles: 0, uploadedBytes: 0, failed: 0, active: [] },
+    run: { startedAt: Date.now(), finishedAt: null, toUpload: 0, done: 0, uploadedFiles: 0, uploadedBytes: 0, failed: 0, active: [], download: newMeter(), upload: newMeter() },
   });
   await report.save(true);
 
@@ -250,7 +264,14 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
     s.run.active.push(cur);
     report.save();
     let assetId = null;
+    let timing = null; // the meter running for this item
+    const time = (m) => {
+      if (timing) meterStop(timing);
+      timing = m;
+      if (m) meterStart(m);
+    };
     try {
+      time(s.run.download);
       const file = await downloadOriginal(it, {
         signal,
         onProgress: ({ filename, received, total }) => {
@@ -259,7 +280,9 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
         },
       });
       if (file.sha1Key !== it.dedupKey) report.log(`Warning: ${file.filename} differs from Google's checksum (not the original?)`);
+      s.run.download.bytes += file.size;
       Object.assign(cur, { name: file.filename, step: 'uploading', received: file.size, size: file.size });
+      time(s.run.upload);
       report.save();
       const res = await immich.upload({
         blob: file.blob,
@@ -268,6 +291,8 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
         modifiedAt: new Date(it.takenMs),
         sha1Hex: file.sha1Hex,
       });
+      time(null);
+      s.run.upload.bytes += file.size;
       assetId = res.id;
       status[it.mediaKey] = { state: res.status === 'created' ? 'uploaded' : 'in-immich', assetId: res.id };
       ledger[it.mediaKey] = res.id;
@@ -291,6 +316,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
       s.run.failed++;
       report.log(`Failed ${cur.name ?? it.mediaKey}: ${err.message}`);
     } finally {
+      time(null);
       s.run.active.splice(s.run.active.indexOf(cur), 1);
     }
     s.run.done++;
@@ -323,7 +349,10 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   s[dryRun ? 'lastCheckAt' : 'lastSyncAt'] = s.run.finishedAt;
   if (!dryRun) {
     const r = s.run;
-    s.lastSync = { files: r.uploadedFiles, bytes: r.uploadedBytes, failed: r.failed, durationMs: r.finishedAt - r.startedAt };
+    s.lastSync = {
+      files: r.uploadedFiles, bytes: r.uploadedBytes, failed: r.failed, durationMs: r.finishedAt - r.startedAt,
+      download: { bytes: r.download.bytes, ms: r.download.ms }, upload: { bytes: r.upload.bytes, ms: r.upload.ms },
+    };
     report.log(
       `Sync finished: copied ${r.uploadedFiles} (${mb(r.uploadedBytes)})` + (r.failed ? `, ${r.failed} failed` : '') +
         ` in ${Math.round((r.finishedAt - r.startedAt) / 1000)} s`,
