@@ -39,6 +39,8 @@ videos are both supported.
   speed and time left. It works for background syncs too, and the toolbar icon shows the percentage.
 - Stats: items in Immich, still to copy, failed, and files and bytes copied per sync and in total.
 - **Check** compares an album with Immich without copying anything.
+- **Stop** ends a running sync or check straight away, including a background one. The next
+  sync continues where it stopped.
 - Periodic background sync with a configurable interval. Manual and background runs never overlap.
 
 ## Screenshots
@@ -81,8 +83,12 @@ recreates them from the real extension page.
 
 Each album card shows its percentage in Immich, what is happening now, and its stats.
 **Photos** shows the album with each item marked *In Immich*, *Not in Immich*, *Copied* or
-*Failed*. **Activity log** keeps the last 200 events. If a sync is interrupted (Chrome
-closed, tab closed), the card says so, and the next run continues where it stopped.
+*Failed*. **Activity log** keeps the last 200 events.
+
+While a sync or check runs, its **Sync** / **Check** buttons turn into **Stop**. Stopping
+cancels the file being copied and skips the remaining albums. Files already copied stay in
+Immich. If a sync is interrupted (Stop, Chrome closed, tab closed), the card says so, and the
+next run continues where it stopped. Automatic sync still runs at its next scheduled time.
 
 **API key permissions:** `asset.upload`, `asset.read`, `album.create`, `album.read`,
 `album.update` (or "All").

@@ -1,11 +1,13 @@
 // Per-album progress and stats, shared between the extension page and the background
 // worker through chrome.storage, so the page shows a sync whichever of them runs it.
-// A heartbeat lock in storage.session keeps the two from syncing at the same time.
+// A heartbeat lock in storage.session keeps the two from syncing at the same time, and
+// a stop request there lets the page stop a sync whichever of them runs it.
 
 const PREFIX = 'albumState:';
 const LOG_LINES = 200;
 const SAVE_DELAY_MS = 300;
 export const LOCK_KEY = 'syncLock';
+export const STOP_KEY = 'syncStop';
 const LOCK_BEAT_MS = 15_000;
 const LOCK_STALE_MS = 60_000;
 
@@ -66,15 +68,33 @@ export async function getLock() {
 
 export const isLockActive = (lock) => Boolean(lock && Date.now() - lock.beat < LOCK_STALE_MS);
 
-// Returns a release function, or null if another sync holds the lock.
+// Asks the sync holding `lock` to stop. The request names the run (its `since`), so it
+// cannot stop a later one.
+export const requestStop = (lock) => chrome.storage.session.set({ [STOP_KEY]: lock.since });
+
+export async function getStopRequest() {
+  return (await chrome.storage.session.get(STOP_KEY))[STOP_KEY] ?? null;
+}
+
+// Returns {release, signal}, or null if another sync holds the lock. The signal aborts
+// when requestStop() is called for this run.
 export async function acquireLock(owner) {
   if (isLockActive(await getLock())) return null;
   const since = Date.now();
+  const stop = new AbortController();
+  const onChanged = (changes, area) => {
+    if (area === 'session' && changes[STOP_KEY]?.newValue === since) stop.abort();
+  };
+  chrome.storage.onChanged.addListener(onChanged);
   const beat = () => chrome.storage.session.set({ [LOCK_KEY]: { ...owner, since, beat: Date.now() } });
   await beat();
   const timer = setInterval(beat, LOCK_BEAT_MS);
-  return async () => {
-    clearInterval(timer);
-    await chrome.storage.session.remove(LOCK_KEY);
+  return {
+    signal: stop.signal,
+    async release() {
+      clearInterval(timer);
+      chrome.storage.onChanged.removeListener(onChanged);
+      await chrome.storage.session.remove([LOCK_KEY, STOP_KEY]);
+    },
   };
 }

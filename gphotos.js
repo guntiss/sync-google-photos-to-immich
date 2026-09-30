@@ -162,7 +162,7 @@ function pageContext(html) {
 }
 
 // Call one rpc; returns its decoded payloads plus the raw response for debugging.
-async function batchExecute(ctx, rpcid, request, sourcePath) {
+async function batchExecute(ctx, rpcid, request, sourcePath, signal) {
   const freq = JSON.stringify([[[rpcid, JSON.stringify(request), null, 'generic']]]);
   const qs = new URLSearchParams({
     rpcids: rpcid,
@@ -181,6 +181,7 @@ async function batchExecute(ctx, rpcid, request, sourcePath) {
     credentials: 'include',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
     body,
+    signal,
   });
   if (!res.ok) throw new Error(`batchexecute ${rpcid} failed: HTTP ${res.status}`);
   const text = await res.text();
@@ -191,10 +192,10 @@ async function batchExecute(ctx, rpcid, request, sourcePath) {
 /**
  * List every item in a shared album.
  * @param {string} input album URL (photos.google.com/share/... or a photos.app.goo.gl short link)
- * @param {{onProgress?: (n: number) => void, debug?: boolean}} opts
+ * @param {{onProgress?: (n: number) => void, debug?: boolean, signal?: AbortSignal}} opts
  */
 export async function listAlbum(input, opts = {}) {
-  const res = await fetch(fetchableUrl(input), { credentials: 'include', redirect: 'follow' });
+  const res = await fetch(fetchableUrl(input), { credentials: 'include', redirect: 'follow', signal: opts.signal });
   if (res.url.startsWith('https://accounts.google.com/')) {
     throw new Error('Not signed in to Google in this browser profile (redirected to login).');
   }
@@ -244,7 +245,7 @@ export async function listAlbum(input, opts = {}) {
   let pages = 1;
   while (nextToken && pages < MAX_PAGES) {
     const request = [albumKey, nextToken, null, authKey];
-    const { payloads, text } = await batchExecute(ctx, 'snAcKc', request, `/share/${shareId}`);
+    const { payloads, text } = await batchExecute(ctx, 'snAcKc', request, `/share/${shareId}`, opts.signal);
     debug?.pages.push(text);
     const before = items.size;
     let token = null;
@@ -348,10 +349,10 @@ function filenameFromDisposition(cd) {
  * Download the original file of an item (=d photo, =dv video).
  * Returns the blob plus its SHA-1 in hex and in Google's dedupKey encoding, so the
  * caller can verify the bytes are the original.
- * @param {{onProgress?: (p: {filename: string, received: number, total: number|null}) => void}} opts
+ * @param {{onProgress?: (p: {filename: string, received: number, total: number|null}) => void, signal?: AbortSignal}} opts
  */
-export async function downloadOriginal(item, { onProgress } = {}) {
-  const res = await fetch(`${item.thumbUrl}=${item.isVideo ? 'dv' : 'd'}`, { credentials: 'include' });
+export async function downloadOriginal(item, { onProgress, signal } = {}) {
+  const res = await fetch(`${item.thumbUrl}=${item.isVideo ? 'dv' : 'd'}`, { credentials: 'include', signal });
   if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
   const type = res.headers.get('content-type') || '';
   if (type.startsWith('text/')) throw new Error(`Download returned ${type}, not media`);

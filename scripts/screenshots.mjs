@@ -152,7 +152,11 @@ function installChromeStub(seed) {
   };
   const noop = async () => {};
   window.chrome = {
-    storage: { local: area('local'), session: area('session'), onChanged: { addListener: (f) => listeners.push(f) } },
+    storage: {
+      local: area('local'),
+      session: area('session'),
+      onChanged: { addListener: (f) => listeners.push(f), removeListener: (f) => listeners.splice(listeners.indexOf(f), 1) },
+    },
     permissions: { contains: async () => true, request: async () => true },
     alarms: { get: async () => ({ name: 'gphotos-sync', periodInMinutes: 60, scheduledTime: Date.now() + 38 * 60e3 }) },
     action: { setBadgeText: noop, setBadgeBackgroundColor: noop },

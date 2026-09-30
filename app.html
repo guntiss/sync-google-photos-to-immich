@@ -20,6 +20,7 @@
     <div class="toolbar">
       <button id="syncAll" class="primary" type="button">Sync all</button>
       <button id="checkAll" type="button" title="Compare with Immich without copying anything">Check all</button>
+      <button id="stopSync" type="button" title="The next sync continues where this one stopped" hidden>Stop</button>
       <span id="schedule" class="muted"></span>
       <button id="openPicker" type="button">+ Add albums</button>
     </div>
@@ -95,6 +96,7 @@
         <div class="card-actions">
           <button data-action="check" type="button" title="Compare with Immich without copying anything">Check</button>
           <button data-action="sync" class="primary" type="button">Sync</button>
+          <button data-action="stop" type="button" title="The next sync continues where this one stopped" hidden>Stop</button>
           <button data-action="remove" class="icon" type="button" title="Stop syncing this album">✕</button>
         </div>
       </div>

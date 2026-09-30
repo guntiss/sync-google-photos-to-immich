@@ -2,7 +2,8 @@ import { listAlbum, listAlbums, parseAlbumUrl } from './gphotos.js';
 import { Immich, normalizeBaseUrl } from './immich.js';
 import { ALARM, BusyError, loadConfig, runSync } from './sync.js';
 import {
-  getLock, getStates, isLockActive, LOCK_KEY, percentDone, removeState, RUNNING_PHASES, stateKey, urlFromKey,
+  getLock, getStates, getStopRequest, isLockActive, LOCK_KEY, percentDone, removeState, requestStop, RUNNING_PHASES,
+  stateKey, STOP_KEY, urlFromKey,
 } from './state.js';
 
 const $ = (id) => document.getElementById(id);
@@ -10,6 +11,7 @@ const $ = (id) => document.getElementById(id);
 let config = { settings: {}, albums: [] };
 let states = {}; // album url -> shared state (see state.js / sync.js)
 let lock = null;
+let stopFor = null; // lock.since of the run a stop was requested for
 let lastRun = null;
 let alarm = null;
 let localRun = false;
@@ -62,6 +64,7 @@ function download(name, obj) {
 
 const configured = () => Boolean(config.settings.immichUrl && config.settings.apiKey);
 const busy = () => localRun || isLockActive(lock);
+const stopping = () => Boolean(lock && stopFor === lock.since);
 
 function showBanner(msg, kind = 'err') {
   const b = $('banner');
@@ -96,6 +99,14 @@ async function start({ urls, dryRun }) {
   }
 }
 
+// Stops the running sync, whether this page or the background worker runs it.
+function stop() {
+  if (!isLockActive(lock) || stopping()) return;
+  stopFor = lock.since;
+  requestStop(lock);
+  refreshAll();
+}
+
 // ---------- album cards
 
 function createCard(url) {
@@ -109,11 +120,13 @@ function createCard(url) {
     photos: q('.photos'), filter: q('.filter'), grid: q('.grid'), note: q('.photos-note'),
     log: q('.log'),
     buttons: [...node.querySelectorAll('[data-action=check], [data-action=sync]')],
+    stop: q('[data-action=stop]'),
   };
   c.src.href = url;
   c.src.textContent = url.replace(/^https:\/\//, '');
   q('[data-action=check]').onclick = () => start({ urls: [url], dryRun: true });
   q('[data-action=sync]').onclick = () => start({ urls: [url], dryRun: false });
+  c.stop.onclick = stop;
   q('[data-action=remove]').onclick = () => removeAlbum(url);
   q('[data-action=export]').onclick = () => exportList(url);
   q('[data-action=raw]').onclick = () => exportRaw(url);
@@ -158,6 +171,11 @@ function describe(s, running, interrupted) {
     }
   }
   if (s.phase === 'error') return { text: s.message, tone: 'err' };
+  if (s.phase === 'stopped') {
+    if (s.mode === 'check') return { text: 'Check stopped. Click Check to run it again.', tone: 'warn' };
+    const copied = s.run?.uploadedFiles ? ` after copying ${plural(s.run.uploadedFiles, 'item')}` : '';
+    return { text: `Sync stopped${copied}. Click Sync to continue where it stopped.`, tone: 'warn' };
+  }
   if (s.failed) return { text: `${plural(s.failed, 'item')} could not be copied. See the activity log.`, tone: 'err' };
   if (s.missing) {
     return { text: `${plural(s.missing, 'item')} not in Immich yet. Click Sync to copy them.`, tone: 'warn' };
@@ -195,7 +213,7 @@ function updateCard(url) {
   c.node.classList.toggle('complete', !running && pct === 100);
   c.node.classList.toggle('has-errors', !running && Boolean(s?.failed));
 
-  const d = describe(s, running, interrupted);
+  const d = running && stopping() ? { text: 'Stopping…' } : describe(s, running, interrupted);
   c.status.className = `status ${d.tone ?? ''}`;
   c.status.replaceChildren(d.text ?? '', d.sub ? el('span', { className: 'sub' }, d.sub) : '');
 
@@ -222,7 +240,18 @@ function updateCard(url) {
   if (atBottom) c.log.scrollTop = c.log.scrollHeight;
 
   const disabled = busy() || !configured();
-  c.buttons.forEach((b) => (b.disabled = disabled));
+  c.buttons.forEach((b) => {
+    b.disabled = disabled;
+    b.hidden = running;
+  });
+  showStop(c.stop, running);
+}
+
+// Stop replaces the start buttons while a run is going, and says so once it's asked.
+function showStop(button, show) {
+  button.hidden = !show;
+  button.disabled = stopping();
+  button.textContent = stopping() ? 'Stopping…' : 'Stop';
 }
 
 function renderAlbums() {
@@ -589,14 +618,19 @@ function renderOverview() {
   );
 
   const off = busy() || !configured() || !config.albums.length;
-  $('syncAll').disabled = off;
-  $('checkAll').disabled = off;
+  const running = isLockActive(lock);
+  for (const id of ['syncAll', 'checkAll']) {
+    $(id).disabled = off;
+    $(id).hidden = running;
+  }
+  showStop($('stopSync'), running);
 
   const minutes = Number(config.settings.intervalMinutes);
   const parts = [];
-  if (isLockActive(lock)) {
+  if (running) {
     const what = lock.mode === 'check' ? 'Check' : 'Sync';
-    parts.push(lock.trigger === 'schedule' ? `Automatic ${what.toLowerCase()} running…` : `${what} running…`);
+    if (stopping()) parts.push(`Stopping the ${what.toLowerCase()}…`);
+    else parts.push(lock.trigger === 'schedule' ? `Automatic ${what.toLowerCase()} running…` : `${what} running…`);
   }
   else if (minutes > 0) {
     const every = $('interval').querySelector(`option[value="${minutes}"]`)?.textContent.toLowerCase() ?? `every ${minutes} minutes`;
@@ -605,7 +639,7 @@ function renderOverview() {
   if (lastRun) {
     const what = `${lastRun.trigger === 'schedule' ? 'automatic' : 'manual'} ${lastRun.dryRun ? 'check' : 'sync'}`;
     const bad = lastRun.error || lastRun.results?.some((r) => r.error || r.failed);
-    parts.push(`last ${what} ${ago(lastRun.at)}${bad ? ' (with errors)' : ''}`);
+    parts.push(`last ${what} ${ago(lastRun.at)}${bad ? ' (with errors)' : lastRun.stopped ? ' (stopped)' : ''}`);
   }
   $('schedule').textContent = parts.join(' · ');
 }
@@ -712,12 +746,14 @@ $('openSettings').onclick = openSettings;
 $('conn').onclick = openSettings;
 $('syncAll').onclick = () => start({ dryRun: false });
 $('checkAll').onclick = () => start({ dryRun: true });
+$('stopSync').onclick = stop;
 
 // ---------- live updates
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'session' && LOCK_KEY in changes) {
-    lock = changes[LOCK_KEY].newValue ?? null;
+  if (area === 'session') {
+    if (LOCK_KEY in changes) lock = changes[LOCK_KEY].newValue ?? null;
+    if (STOP_KEY in changes) stopFor = changes[STOP_KEY].newValue ?? null;
     refreshAll();
     return;
   }
@@ -748,9 +784,10 @@ setInterval(() => refreshAlarm().then(refreshAll), 15_000);
 // ---------- init
 
 config = await loadConfig();
-[states, lock, { lastRun = null }] = await Promise.all([
+[states, lock, stopFor, { lastRun = null }] = await Promise.all([
   getStates(config.albums),
   getLock(),
+  getStopRequest(),
   chrome.storage.local.get('lastRun'),
   refreshAlarm(),
 ]);

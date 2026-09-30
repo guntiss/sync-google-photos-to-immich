@@ -24,13 +24,14 @@ const mb = (n) => `${(n / 1e6).toFixed(1)} MB`;
 
 /**
  * Sync (or with dryRun, only check) one album, reporting progress into report.state:
- *   phase: listing -> checking -> uploading -> album -> done
+ *   phase: listing -> checking -> uploading -> album -> done (or 'stopped' / 'error', set by runSync)
  *   title / albumKey, total / inImmich / trashed / missing / failed,
  *   run: {...this run's stats}, totals: {...all time}
  * @returns {{album, status: Record<string, {state: string, assetId?: string, message?: string}>}}
  *   state: 'in-immich' | 'trashed' | 'missing' | 'uploaded' | 'error'
+ * Throws when signal aborts; items copied until then stay counted.
  */
-export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = false, limit = Infinity } = {}) {
+export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = false, limit = Infinity, signal } = {}) {
   const s = report.state;
   Object.assign(s, {
     phase: 'listing',
@@ -42,6 +43,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   await report.save(true);
 
   const album = await listAlbum(albumUrl, {
+    signal,
     onProgress: (n) => {
       s.listed = n;
       report.save();
@@ -95,10 +97,12 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   await report.save(true);
 
   for (const it of queue) {
+    signal?.throwIfAborted();
     s.run.current = { name: null, step: 'downloading', received: 0, size: null, isVideo: it.isVideo };
     report.save();
     try {
       const file = await downloadOriginal(it, {
+        signal,
         onProgress: ({ filename, received, total }) => {
           Object.assign(s.run.current, { name: filename, received, size: total });
           report.save();
@@ -129,6 +133,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
         report.log(`Already in Immich: ${file.filename}`);
       }
     } catch (err) {
+      if (signal?.aborted) throw err; // stopped, not failed: the item is still to copy
       status[it.mediaKey] = { state: 'error', message: err.message };
       s.missing--;
       s.failed++;
@@ -141,6 +146,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   s.run.current = null;
 
   // Mirror into the Immich album.
+  signal?.throwIfAborted();
   s.phase = 'album';
   await report.save(true);
   const albumName = album.title;
@@ -185,7 +191,9 @@ function badgeProgress(state) {
 
 /**
  * Run a check or sync over the given albums (default: all configured) under the
- * shared lock. Throws BusyError if another sync is running.
+ * shared lock. Throws BusyError if another sync is running. A stop request
+ * (state.js requestStop) ends the run: the current album is marked 'stopped' and the
+ * rest are left as they were, and the result has stopped: true.
  * @param {{urls?: string[], dryRun?: boolean, trigger?: 'manual'|'schedule', onAlbum?: (url: string, r: object) => void}} opts
  */
 export async function runSync({ urls, dryRun = false, trigger = 'manual', onAlbum } = {}) {
@@ -197,20 +205,31 @@ export async function runSync({ urls, dryRun = false, trigger = 'manual', onAlbu
     throw new Error(`No access to ${origin} yet. Open Settings and click Save to grant it.`);
   }
 
-  const release = await acquireLock({ trigger, mode: dryRun ? 'check' : 'sync' });
-  if (!release) throw new BusyError('Another sync is already running.');
+  const lock = await acquireLock({ trigger, mode: dryRun ? 'check' : 'sync' });
+  if (!lock) throw new BusyError('Another sync is already running.');
+  const { release, signal } = lock;
   const lastRun = { at: Date.now(), trigger, dryRun, results: [] };
   try {
-    const immich = new Immich(settings.immichUrl, settings.apiKey);
+    const immich = new Immich(settings.immichUrl, settings.apiKey, { signal });
     await immich.me(); // fail fast on a bad URL / key
     for (const url of urls) {
+      signal.throwIfAborted();
       const report = await createReporter(url, { onSave: badgeProgress });
       try {
-        const r = await syncAlbum(url, settings, immich, report, { dryRun });
+        const r = await syncAlbum(url, settings, immich, report, { dryRun, signal });
         onAlbum?.(url, r);
         const { title, run } = report.state;
         lastRun.results.push({ url, title, percent: percentDone(report.state), uploaded: run.uploadedFiles, bytes: run.uploadedBytes, failed: run.failed });
       } catch (err) {
+        if (signal.aborted) {
+          const { title, run } = report.state;
+          report.state.phase = 'stopped';
+          run.current = null;
+          report.log(`${dryRun ? 'Check' : 'Sync'} stopped` + (run.uploadedFiles ? ` after copying ${run.uploadedFiles} (${mb(run.uploadedBytes)})` : ''));
+          await report.save(true);
+          lastRun.results.push({ url, title, stopped: true, uploaded: run.uploadedFiles, bytes: run.uploadedBytes, failed: run.failed });
+          throw err;
+        }
         Object.assign(report.state, { phase: 'error', message: err.message });
         report.log(`Error: ${err.message}`);
         await report.save(true);
@@ -218,8 +237,11 @@ export async function runSync({ urls, dryRun = false, trigger = 'manual', onAlbu
       }
     }
   } catch (err) {
-    lastRun.error = err.message;
-    throw err;
+    if (!signal.aborted) {
+      lastRun.error = err.message;
+      throw err;
+    }
+    lastRun.stopped = true;
   } finally {
     await release();
     lastRun.at = Date.now();

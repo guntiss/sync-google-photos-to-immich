@@ -14,9 +14,11 @@ export function normalizeBaseUrl(input) {
 }
 
 export class Immich {
-  constructor(baseUrl, apiKey) {
+  // signal, if given, aborts every request made through this client.
+  constructor(baseUrl, apiKey, { signal } = {}) {
     this.api = `${normalizeBaseUrl(baseUrl)}/api`;
     this.apiKey = apiKey;
+    this.signal = signal;
   }
 
   async request(method, path, { json, body, headers = {} } = {}) {
@@ -25,7 +27,7 @@ export class Immich {
       h['Content-Type'] = 'application/json';
       body = JSON.stringify(json);
     }
-    const res = await fetch(this.api + path, { method, headers: h, body });
+    const res = await fetch(this.api + path, { method, headers: h, body, signal: this.signal });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`Immich ${method} ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
