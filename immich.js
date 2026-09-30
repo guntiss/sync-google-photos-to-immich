@@ -73,6 +73,15 @@ export class Immich {
     return this.searchAll({ takenAfter: after.toISOString(), takenBefore: before.toISOString(), withDeleted: true });
   }
 
+  getAsset(assetId) {
+    return this.request('GET', `/assets/${assetId}`);
+  }
+
+  // fields: {latitude, longitude}
+  updateAsset(assetId, fields) {
+    return this.request('PUT', `/assets/${assetId}`, { json: fields });
+  }
+
   // -> [{key, value, updatedAt}]
   getMetadata(assetId) {
     return this.request('GET', `/assets/${assetId}/metadata`);

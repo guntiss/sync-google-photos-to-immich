@@ -10,14 +10,15 @@ only to Google and to your Immich server, and the developer never receives any o
 
 - **Google Photos**, through the Google account signed in to your browser:
   - the list of albums in your account, read only when you open **Add albums**
-  - the contents of the albums you add (item IDs, capture times, checksums, thumbnails)
+  - the contents of the albums you add (item IDs, capture times, locations, checksums, thumbnails)
   - the original photo and video files of items your Immich server doesn't have yet
 
   It makes the same requests the Google Photos website makes. It never changes or deletes
   anything in Google Photos.
 - **Your Immich server**, at the URL and with the API key you enter. The extension checks which
   items Immich already has, uploads the missing files, creates and updates albums named after
-  the Google albums, and adds a small record to each copied asset's metadata (the Google item
+  the Google albums, sets the location of copied assets that have none (the one Google Photos
+  shows for the item), and adds a small record to each copied asset's metadata (the Google item
   ID and checksum), so copies can be recognised later. It never deletes anything in Immich.
 
 ## What the extension stores

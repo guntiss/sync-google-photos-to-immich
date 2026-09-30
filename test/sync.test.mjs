@@ -47,6 +47,9 @@ const uploads = [];
 const assets = new Map(); // Immich: id -> {id, type, fileCreatedAt, isTrashed}
 const metadata = new Map(); // Immich: asset id -> {key: value}
 const metadataWrites = [];
+const googleLocations = new Map(); // Google Photos: mediaKey -> [latE7, lngE7] (items not listed have none)
+let googleLocationsFail = false;
+const locationWrites = []; // Immich: [assetId, {latitude, longitude}]
 let onFetch = null; // test hook, called with each request before it is answered
 globalThis.fetch = async (url, init = {}) => {
   url = String(url);
@@ -57,6 +60,17 @@ globalThis.fetch = async (url, init = {}) => {
     const r = new Response(albums[url]);
     Object.defineProperty(r, 'url', { value: url });
     return r;
+  }
+  if (url.includes('/_/PhotosUi/data/batchexecute')) {
+    if (googleLocationsFail) return new Response('nope', { status: 403 });
+    const asked = JSON.parse(new URLSearchParams(String(init.body)).get('f.req'))[0];
+    assert.ok(asked.every((r) => r[0] === 'fDcn4b'));
+    const lines = asked.map((r, i) => {
+      const mediaKey = JSON.parse(r[1])[0];
+      const info = [mediaKey, '', 'IMG.jpg', 0, 0, 1, 1, 1, null, googleLocations.has(mediaKey) ? [googleLocations.get(mediaKey), true] : null];
+      return JSON.stringify([['wrb.fr', 'fDcn4b', JSON.stringify([info]), null, null, null, String(i)]]);
+    });
+    return new Response(`)]}'\n\n${lines.join('\n')}\n`);
   }
   const dl = url.match(/\/p(\d)=d$/);
   if (dl) {
@@ -97,11 +111,25 @@ globalThis.fetch = async (url, init = {}) => {
     metadataWrites.push(...items);
     return json(items);
   }
+  const asset = path.match(/^\/assets\/([^/]+)$/);
+  if (asset && m === 'GET') {
+    return assets.has(asset[1]) ? json(assets.get(asset[1])) : new Response('{"message":"Not found"}', { status: 404 });
+  }
+  if (asset && m === 'PUT') {
+    if (!assets.has(asset[1])) return new Response('{"message":"Not found"}', { status: 400 });
+    const fields = JSON.parse(init.body);
+    locationWrites.push([asset[1], fields]);
+    assets.get(asset[1]).exifInfo = { ...fields };
+    return json(assets.get(asset[1]));
+  }
   if (path === '/albums' && m === 'GET') return json([]);
   if (path === '/albums' && m === 'POST') return json({ id: 'alb1', albumName: JSON.parse(init.body).albumName });
   if (path === '/albums/alb1/assets') return json(JSON.parse(init.body).ids.map((id) => ({ id, success: true })));
   throw new Error(`unexpected fetch ${m} ${url}`);
 };
+
+googleLocations.set(key(1), [567985694, 241725000]); // already in Immich, but not among its assets: deleted since
+googleLocations.set(key(2), [567985694, 241725000]);
 
 local.set('settings', { immichUrl: IMMICH, apiKey: 'k', addExisting: true, intervalMinutes: 0 });
 local.set('albums', [ALBUM_URL]);
@@ -144,10 +172,51 @@ test('sync copies oldest first and records progress and stats', async () => {
 
   const phases = snapshots.map((o) => o[stateKey(ALBUM_URL)]?.phase).filter(Boolean);
   const order = [...new Set(phases)];
-  assert.deepEqual(order, ['listing', 'checking', 'uploading', 'album', 'done']);
+  assert.deepEqual(order, ['listing', 'checking', 'uploading', 'locations', 'album', 'done']);
   const mid = snapshots.map((o) => o[stateKey(ALBUM_URL)]).find((x) => x?.phase === 'uploading' && x.run.done === 1);
   assert.equal(mid.missing, 1, 'percentage advances per copied item');
   assert.equal(session.size, 0, 'lock released');
+});
+
+test('the location Google Photos shows is copied onto the copies, once, and never over one Immich has', async () => {
+  // Run 1 (above) copied items 2 and 3; only item 2 has a location.
+  assert.deepEqual(locationWrites, [['new-IMG_2.jpg', { latitude: 56.7985694, longitude: 24.1725 }]]);
+  const s = local.get(stateKey(ALBUM_URL));
+  assert.ok(s.log.some((l) => l.includes('Copied the location of 1 item from Google Photos to Immich')));
+  assert.deepEqual(Object.keys(local.get('located')).sort(), [key(1), key(2), key(3)].sort());
+
+  let asked = 0;
+  onFetch = (url) => void (url.includes('batchexecute') && asked++);
+  await runSync({ urls: [ALBUM_URL] });
+  assert.equal(asked, 0, 'not asked for again');
+
+  // A location Immich already has (a Takeout import, or set by hand) is left alone.
+  googleLocations.set(key(3), [10000000, 20000000]);
+  assets.get('new-IMG_3.jpg').exifInfo = { latitude: 1, longitude: 2 };
+  local.set('located', {});
+  locationWrites.length = 0;
+  await runSync({ urls: [ALBUM_URL], dryRun: true });
+  assert.equal(asked, 0, 'a check does not ask either');
+  await runSync({ urls: [ALBUM_URL] });
+  onFetch = null;
+  assert.deepEqual(locationWrites, [], 'item 2 got its location earlier, and item 3 already has one');
+  googleLocations.delete(key(3));
+});
+
+test('failing to get locations does not fail the sync, and is tried again next time', async () => {
+  local.set('located', {});
+  locationWrites.length = 0;
+  googleLocationsFail = true;
+  const run = await runSync({ urls: [ALBUM_URL] });
+  googleLocationsFail = false;
+  assert.equal(run.results[0].error, undefined);
+  const s = local.get(stateKey(ALBUM_URL));
+  assert.equal(s.phase, 'done');
+  assert.ok(s.log.some((l) => l.includes('Could not copy locations to Immich: batchexecute fDcn4b failed: HTTP 403')));
+  assert.deepEqual(local.get('located'), {});
+
+  await runSync({ urls: [ALBUM_URL] });
+  assert.deepEqual(Object.keys(local.get('located')).sort(), [key(1), key(2), key(3)].sort());
 });
 
 test('a second run is refused while the lock is held', async () => {

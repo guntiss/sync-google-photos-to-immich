@@ -155,6 +155,8 @@ function describe(s, running, interrupted) {
         return { text: `Reading the album from Google Photos… ${s.listed ? plural(s.listed, 'item') : ''}` };
       case 'checking':
         return { text: `Comparing ${plural(s.total, 'item')} with Immich…` };
+      case 'locations':
+        return { text: 'Copying locations from Google Photos…' };
       case 'album':
         return { text: 'Updating the Immich album…' };
       case 'uploading': {

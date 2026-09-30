@@ -35,6 +35,7 @@ Unofficial. Not affiliated with or endorsed by Google or Immich.
 HOW IT WORKS
 • Pick albums from the shared albums in the Google account signed in to Chrome (shared with you or by you), or paste a share link.
 • Each album is compared with your whole Immich library by checksum, and only what's missing is copied: original photos and videos, oldest first.
+• Locations are kept: Google strips them from most downloads, so the extension reads where each photo was taken from Google Photos and sets it in Immich (a location Immich already has is never replaced).
 • Each Google album is mirrored into an Immich album with the same name.
 • Background sync runs on the schedule you choose while Chrome is open. You can also Sync, Check or Stop by hand, and follow the progress of every album.
 

@@ -1,6 +1,6 @@
 // Orchestrates: list Google album -> dedupe against Immich by SHA-1 -> upload missing
 // -> mirror into an Immich album named after the Google album.
-import { listAlbum, downloadOriginal } from './gphotos.js';
+import { listAlbum, downloadOriginal, fetchLocations } from './gphotos.js';
 import { Immich, dedupKeyToChecksum } from './immich.js';
 import { acquireLock, createReporter, percentDone, RUNNING_PHASES } from './state.js';
 
@@ -22,10 +22,14 @@ export const RECORD_KEY = 'google-photos';
 
 // ledger: mediaKey -> Immich asset id, for everything this install copied or found.
 // recorded: mediaKeys whose asset already carries the RECORD_KEY record.
+// located: mediaKeys whose location has been looked at (copied from Google Photos, or
+// not needed), so it is not asked for again.
 async function loadLedger() {
-  const { ledger = {}, recorded = {} } = await chrome.storage.local.get(['ledger', 'recorded']);
-  return { ledger, recorded };
+  const { ledger = {}, recorded = {}, located = {} } = await chrome.storage.local.get(['ledger', 'recorded', 'located']);
+  return { ledger, recorded, located };
 }
+
+const LOCATION_CHUNK = 200;
 
 const MAX_SHIFT_MS = 15 * 3_600_000;
 const QUARTER_HOUR_MS = 15 * 60_000;
@@ -150,7 +154,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   report.log(`Read "${album.title}" from Google Photos: ${album.items.length} items (${videos} videos)`);
   await report.save(true);
 
-  const { ledger, recorded } = await loadLedger();
+  const { ledger, recorded, located } = await loadLedger();
 
   // Writes the RECORD_KEY record onto copies ([{it, assetId}]). Failing is not fatal: this
   // install's ledger still knows the copies, only other installs won't find them.
@@ -324,6 +328,53 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
     if (assetId) await record([{ it, assetId }]);
   };
   await eachLimit(queue, PARALLEL_COPIES, copy);
+
+  // Google's download of a shared item mostly has its GPS tags stripped, so Immich would have
+  // no location for the copy. Give it the one Google Photos shows, for new copies and for
+  // earlier ones, but never replace a location Immich already has (a Takeout import, or one
+  // set by hand). Failing is not fatal: the items not done are tried again next sync.
+  signal?.throwIfAborted();
+  const wantLocation = album.items.filter(
+    (it) => ['in-immich', 'uploaded'].includes(status[it.mediaKey]?.state) && !located[it.mediaKey],
+  );
+  if (!dryRun && wantLocation.length) {
+    s.phase = 'locations';
+    await report.save(true);
+    let set = 0;
+    try {
+      for (let i = 0; i < wantLocation.length; i += LOCATION_CHUNK) {
+        signal?.throwIfAborted();
+        const chunk = wantLocation.slice(i, i + LOCATION_CHUNK);
+        try {
+          const places = await fetchLocations(album.session, chunk, { signal });
+          await eachLimit(chunk, 8, async (it) => {
+            if (!places.has(it.mediaKey)) return;
+            const place = places.get(it.mediaKey);
+            const { assetId } = status[it.mediaKey];
+            try {
+              if (place) {
+                const asset = await immich.getAsset(assetId);
+                if (asset.exifInfo?.latitude == null) {
+                  await immich.updateAsset(assetId, place);
+                  set++;
+                }
+              }
+            } catch (err) {
+              // The asset was deleted from Immich meanwhile: nothing to set.
+              if (err.status !== 400 && err.status !== 404) throw err;
+            }
+            located[it.mediaKey] = 1;
+          });
+        } finally {
+          await chrome.storage.local.set({ located });
+        }
+      }
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      report.log(`Could not copy locations to Immich: ${err.message}`);
+    }
+    if (set) report.log(`Copied the location of ${set} ${set === 1 ? 'item' : 'items'} from Google Photos to Immich`);
+  }
 
   // Mirror into the Immich album.
   signal?.throwIfAborted();

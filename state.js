@@ -11,7 +11,7 @@ export const STOP_KEY = 'syncStop';
 const LOCK_BEAT_MS = 15_000;
 const LOCK_STALE_MS = 60_000;
 
-export const RUNNING_PHASES = new Set(['listing', 'checking', 'uploading', 'album']);
+export const RUNNING_PHASES = new Set(['listing', 'checking', 'uploading', 'locations', 'album']);
 export const stateKey = (url) => PREFIX + url;
 export const urlFromKey = (key) => (key.startsWith(PREFIX) ? key.slice(PREFIX.length) : null);
 

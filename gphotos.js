@@ -13,6 +13,7 @@ const PHOTOS = 'https://photos.google.com';
 const KEY_PREFIX = 'AF1Qip';
 const VIDEO_INFO_KEY = '76647426';
 const ALBUM_META_KEY = '72930366';
+const LOCATION_BATCH = 50;
 const SHORT_LINK = /^https:\/\/photos\.app\.goo\.gl\/\w+$/;
 const MAX_PAGES = 500;
 
@@ -204,9 +205,11 @@ function pageContext(html) {
   return { at: pickWiz(html, 'SNlM0e'), sid: pickWiz(html, 'FdrFJe'), bl: pickWiz(html, 'cfb2h') };
 }
 
-// Call one rpc; returns its decoded payloads plus the raw response for debugging.
-async function batchExecute(ctx, rpcid, request, sourcePath, signal) {
-  const freq = JSON.stringify([[[rpcid, JSON.stringify(request), null, 'generic']]]);
+// Call one rpc, once per entry of `requests` in a single HTTP request; returns the decoded
+// payloads (in no particular order) plus the raw response for debugging.
+async function batchExecute(ctx, rpcid, requests, sourcePath, signal) {
+  const many = requests.length > 1;
+  const freq = JSON.stringify([requests.map((r, i) => [rpcid, JSON.stringify(r), null, many ? String(i) : 'generic'])]);
   const qs = new URLSearchParams({
     rpcids: rpcid,
     'source-path': sourcePath,
@@ -288,7 +291,7 @@ export async function listAlbum(input, opts = {}) {
   let pages = 1;
   while (nextToken && pages < MAX_PAGES) {
     const request = [albumKey, nextToken, null, authKey];
-    const { payloads, text } = await batchExecute(ctx, 'snAcKc', request, `/share/${shareId}`, opts.signal);
+    const { payloads, text } = await batchExecute(ctx, 'snAcKc', [request], `/share/${shareId}`, opts.signal);
     debug?.pages.push(text);
     const before = items.size;
     let token = null;
@@ -310,8 +313,36 @@ export async function listAlbum(input, opts = {}) {
     albumKey,
     pages,
     items: sorted,
+    session: { ctx, shareId, authKey },
     ...(debug && { debug }),
   };
+}
+
+// Where an item was taken, from its info (rpc fDcn4b, what the info panel shows):
+//   [mediaKey, '', fileName, takenMs, tzOffsetMs, size, w, h, null, [[latE7, lngE7], ...], ...]
+// -> {latitude, longitude} in degrees, or null when Google has no location for it.
+export function parseLocation(info) {
+  const [lat, lng] = info?.[9]?.[0] ?? [];
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90e7 || Math.abs(lng) > 180e7) return null;
+  return { latitude: lat / 1e7, longitude: lng / 1e7 };
+}
+
+/**
+ * Where Google Photos says `items` of a listed album were taken. Google's download of an
+ * item often has its GPS tags stripped, so the location has to be read separately.
+ * @returns {Promise<Map<string, {latitude: number, longitude: number} | null>>} mediaKey ->
+ *   location, or null if Google has none. Items Google gave no answer for are left out.
+ */
+export async function fetchLocations({ ctx, shareId, authKey }, items, { signal } = {}) {
+  const out = new Map();
+  for (let i = 0; i < items.length; i += LOCATION_BATCH) {
+    const requests = items.slice(i, i + LOCATION_BATCH).map((it) => [it.mediaKey, null, authKey, null, null, [2]]);
+    const { payloads } = await batchExecute(ctx, 'fDcn4b', requests, `/share/${shareId}`, signal);
+    for (const info of payloads.map((p) => p?.[0])) {
+      if (typeof info?.[0] === 'string') out.set(info[0], parseLocation(info));
+    }
+  }
+  return out;
 }
 
 // One entry of the albums list (rpc Z5xsfc):
@@ -358,7 +389,7 @@ export async function listAlbums() {
   let token = null;
   for (let page = 0; page < MAX_PAGES; page++) {
     const request = [token, null, null, null, 1, null, null, 100, [2], 5];
-    const { payloads } = await batchExecute(ctx, 'Z5xsfc', request, '/albums');
+    const { payloads } = await batchExecute(ctx, 'Z5xsfc', [request], '/albums');
     const data = payloads[0];
     for (const e of data?.[0] ?? []) {
       const a = parseAlbumEntry(e);

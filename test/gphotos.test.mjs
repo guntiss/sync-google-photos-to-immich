@@ -3,7 +3,7 @@
 // NOT prove the live format matches — see README.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchableUrl, listAlbum, listAlbums, parseAlbumUrl } from '../gphotos.js';
+import { fetchableUrl, fetchLocations, listAlbum, listAlbums, parseAlbumUrl, parseLocation } from '../gphotos.js';
 
 const key = (n) => 'AF1Qip' + String(n).padStart(40, 'x');
 const item = (n, ms, video = false) => [
@@ -177,4 +177,41 @@ test('other errors are not retried', async () => {
   const calls = flakyAlbum(Infinity, 403);
   await assert.rejects(listAlbum('https://photos.google.com/share/AF1Qipabc'), /HTTP 403/);
   assert.equal(calls.length, 1);
+});
+
+test('parseLocation reads the coordinates Google keeps in E7 degrees', () => {
+  const info = (loc) => [key(1), '', 'IMG_1.HEIC', 1, 0, 1, 1, 1, null, loc];
+  assert.deepEqual(parseLocation(info([[567985694, 241725000], true, null, 2])), { latitude: 56.7985694, longitude: 24.1725 });
+  assert.deepEqual(parseLocation(info([[-338688000, -1512093000]])), { latitude: -33.8688, longitude: -151.2093 });
+  assert.equal(parseLocation(info(null)), null);
+  assert.equal(parseLocation(info([[null, null]])), null);
+  assert.equal(parseLocation(info([[999999999999, 0]])), null, 'out of range');
+  assert.equal(parseLocation(undefined), null);
+});
+
+test('fetchLocations asks 50 items at a time and matches answers by media key', async () => {
+  const items = Array.from({ length: 120 }, (_, i) => ({ mediaKey: key(i) }));
+  const sizes = [];
+  globalThis.fetch = async (url, init) => {
+    const asked = JSON.parse(new URLSearchParams(String(init.body)).get('f.req'))[0];
+    sizes.push(asked.length);
+    assert.ok(new Set(asked.map((r) => r[3])).size === asked.length, 'each request has its own id');
+    assert.equal(JSON.parse(asked[0][1])[2], 'AUTH');
+    // Answers come back in another order, and none for item 7.
+    const lines = asked
+      .filter((r) => JSON.parse(r[1])[0] !== key(7))
+      .reverse()
+      .map((r) => {
+        const mediaKey = JSON.parse(r[1])[0];
+        const loc = mediaKey === key(3) ? null : [[1e7, 2e7]];
+        return JSON.stringify([['wrb.fr', 'fDcn4b', JSON.stringify([[mediaKey, '', 'x', 0, 0, 1, 1, 1, null, loc]]), null, null, null, r[3]]]);
+      });
+    return new Response(`)]}'\n\n${lines.join('\n')}\n`);
+  };
+  const got = await fetchLocations({ ctx: {}, shareId: 'S', authKey: 'AUTH' }, items);
+  assert.deepEqual(sizes, [50, 50, 20]);
+  assert.equal(got.size, 119, 'no answer for item 7 means unknown, not "no location"');
+  assert.ok(!got.has(key(7)));
+  assert.equal(got.get(key(3)), null);
+  assert.equal(got.get(key(0)).longitude, 2);
 });
