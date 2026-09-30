@@ -139,3 +139,42 @@ test('login redirect gives a clear error', async () => {
   };
   await assert.rejects(listAlbum('https://photos.google.com/share/x'), /Not signed in/);
 });
+
+// Serves the album page after `fails` responses with the given status.
+function flakyAlbum(fails, status, retryAfter = '0') {
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (calls.length <= fails) return new Response('', { status, headers: { 'Retry-After': retryAfter } });
+    if (String(url).includes('batchexecute')) return new Response(batch, { status: 200 });
+    const r = new Response(html, { status: 200 });
+    Object.defineProperty(r, 'url', { value: 'https://photos.google.com/share/AF1Qipabc' });
+    return r;
+  };
+  return calls;
+}
+
+test('rate-limited requests are retried after Retry-After', async () => {
+  const calls = flakyAlbum(2, 429);
+  const res = await listAlbum('https://photos.google.com/share/AF1Qipabc');
+  assert.equal(res.items.length, 3);
+  assert.equal(calls.length, 4); // two 429s, the page, the batchexecute page
+});
+
+test('retrying gives up after five tries', async () => {
+  const calls = flakyAlbum(Infinity, 503);
+  await assert.rejects(listAlbum('https://photos.google.com/share/AF1Qipabc'), /HTTP 503/);
+  assert.equal(calls.length, 5);
+});
+
+test('a Retry-After longer than a minute fails instead of waiting', async () => {
+  const calls = flakyAlbum(Infinity, 429, '3600');
+  await assert.rejects(listAlbum('https://photos.google.com/share/AF1Qipabc'), /HTTP 429/);
+  assert.equal(calls.length, 1);
+});
+
+test('other errors are not retried', async () => {
+  const calls = flakyAlbum(Infinity, 403);
+  await assert.rejects(listAlbum('https://photos.google.com/share/AF1Qipabc'), /HTTP 403/);
+  assert.equal(calls.length, 1);
+});

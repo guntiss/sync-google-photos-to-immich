@@ -118,6 +118,10 @@ for existing photos.
 5. **Mirror.** Uploaded (and optionally existing) assets are added to an Immich album named
    after the Google album.
 
+If Google answers a request with 429 (too many requests) or a 5xx error, the request is retried
+up to five times, after the wait its `Retry-After` asks for or with exponential backoff. If
+Google asks for more than a minute, the sync stops there and the next one continues.
+
 Google's download often isn't byte for byte the file its `dedupKey` describes, and two
 downloads of the same photo can differ, so the checksum can't be relied on to find earlier
 copies. Two things cover that:

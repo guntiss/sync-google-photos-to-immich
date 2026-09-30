@@ -16,6 +16,49 @@ const ALBUM_META_KEY = '72930366';
 const SHORT_LINK = /^https:\/\/photos\.app\.goo\.gl\/\w+$/;
 const MAX_PAGES = 500;
 
+// Google answers 429 (or a 5xx) when it wants a client to slow down. Such requests are retried
+// after the wait its Retry-After asks for, or with exponential backoff, instead of failing the
+// item or pressing on. A wait longer than MAX_WAIT_MS is not sat out: the response is returned
+// as is, so the run fails and the next scheduled one tries again.
+const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_TRIES = 5;
+const MAX_WAIT_MS = 60_000;
+
+function retryDelay(res, attempt) {
+  const h = res.headers.get('retry-after');
+  if (h) {
+    const ms = /^\d+$/.test(h.trim()) ? Number(h) * 1000 : Date.parse(h) - Date.now();
+    if (!Number.isNaN(ms)) return Math.max(0, ms);
+  }
+  return 2000 * 2 ** attempt * (0.5 + Math.random() / 2);
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function fetchGoogle(url, init = {}) {
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(url, init);
+    if (!RETRY_STATUS.has(res.status) || attempt >= MAX_TRIES) return res;
+    const ms = retryDelay(res, attempt - 1);
+    if (ms > MAX_WAIT_MS) return res;
+    await res.body?.cancel();
+    await sleep(ms, init.signal);
+  }
+}
+
 export function parseAlbumUrl(input) {
   const u = new URL(input.trim());
   const m = u.pathname.match(/^\/share\/([^/]+)/);
@@ -176,7 +219,7 @@ async function batchExecute(ctx, rpcid, request, sourcePath, signal) {
   const body = new URLSearchParams({ 'f.req': freq });
   if (ctx.at) body.set('at', ctx.at);
 
-  const res = await fetch(`${PHOTOS}/_/PhotosUi/data/batchexecute?${qs}`, {
+  const res = await fetchGoogle(`${PHOTOS}/_/PhotosUi/data/batchexecute?${qs}`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
@@ -195,7 +238,7 @@ async function batchExecute(ctx, rpcid, request, sourcePath, signal) {
  * @param {{onProgress?: (n: number) => void, debug?: boolean, signal?: AbortSignal}} opts
  */
 export async function listAlbum(input, opts = {}) {
-  const res = await fetch(fetchableUrl(input), { credentials: 'include', redirect: 'follow', signal: opts.signal });
+  const res = await fetchGoogle(fetchableUrl(input), { credentials: 'include', redirect: 'follow', signal: opts.signal });
   if (res.url.startsWith('https://accounts.google.com/')) {
     throw new Error('Not signed in to Google in this browser profile (redirected to login).');
   }
@@ -299,7 +342,7 @@ export function parseAlbumEntry(e) {
  * @returns {Promise<{account: string|null, albums: Array<ReturnType<typeof parseAlbumEntry> & {ownedByMe: boolean|null}>}>}
  */
 export async function listAlbums() {
-  const res = await fetch(`${PHOTOS}/albums`, { credentials: 'include' });
+  const res = await fetchGoogle(`${PHOTOS}/albums`, { credentials: 'include' });
   if (!res.ok) throw new Error(`Albums page failed: HTTP ${res.status}`);
   const html = await res.text();
   const ctx = pageContext(html);
@@ -352,7 +395,7 @@ function filenameFromDisposition(cd) {
  * @param {{onProgress?: (p: {filename: string, received: number, total: number|null}) => void, signal?: AbortSignal}} opts
  */
 export async function downloadOriginal(item, { onProgress, signal } = {}) {
-  const res = await fetch(`${item.thumbUrl}=${item.isVideo ? 'dv' : 'd'}`, { credentials: 'include', signal });
+  const res = await fetchGoogle(`${item.thumbUrl}=${item.isVideo ? 'dv' : 'd'}`, { credentials: 'include', signal });
   if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
   const type = res.headers.get('content-type') || '';
   if (type.startsWith('text/')) throw new Error(`Download returned ${type}, not media`);
