@@ -54,7 +54,7 @@ LIMITATIONS
 • It reads the same undocumented data the Google Photos website uses, so a change at Google can break it until the extension is updated.
 • Chrome must be running for background syncs.
 
-Open source: https://github.com/guntiss/gphotos-immich-extension
+Open source: https://github.com/guntiss/sync-google-photos-to-immich
 
 Google Photos is a trademark of Google LLC. Immich is a trademark of its owner.
 ```
@@ -71,7 +71,7 @@ Google Photos is a trademark of Google LLC. Immich is a trademark of its owner.
 
 The screenshots show made-up albums and generated images, not real people's photos.
 
-**Homepage URL:** https://github.com/guntiss/gphotos-immich-extension
+**Homepage URL:** https://github.com/guntiss/sync-google-photos-to-immich
 **Support URL:** https://github.com/guntiss/sync-google-photos-to-immich/issues
 
 ## Privacy practices tab

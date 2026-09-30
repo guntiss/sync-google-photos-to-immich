@@ -1,5 +1,5 @@
 {
-  "name": "gphotos-immich-extension",
+  "name": "sync-google-photos-to-immich",
   "private": true,
   "type": "module",
   "scripts": {
