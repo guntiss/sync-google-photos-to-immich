@@ -47,10 +47,10 @@ const uploads = [];
 const assets = new Map(); // Immich: id -> {id, type, fileCreatedAt, isTrashed}
 const metadata = new Map(); // Immich: asset id -> {key: value}
 const metadataWrites = [];
-let onFetch = null; // test hook, called with each url before it is answered
+let onFetch = null; // test hook, called with each request before it is answered
 globalThis.fetch = async (url, init = {}) => {
   url = String(url);
-  await onFetch?.(url);
+  await onFetch?.(url, init);
   init.signal?.throwIfAborted();
   const json = (o) => new Response(JSON.stringify(o), { status: 200 });
   if (albums[url]) {
@@ -120,8 +120,12 @@ test('check reports what is missing without copying', async () => {
 
 test('sync copies oldest first and records progress and stats', async () => {
   snapshots.length = 0;
+  const started = [];
+  onFetch = (url) => void (/=d$/.test(url) && started.push(url));
   const run = await runSync({});
-  assert.deepEqual(uploads, ['IMG_2.jpg', 'IMG_3.jpg']);
+  onFetch = null;
+  assert.deepEqual(started.map((u) => u.match(/p(\d)=d$/)[1]), ['2', '3'], 'oldest first');
+  assert.deepEqual([...uploads].sort(), ['IMG_2.jpg', 'IMG_3.jpg']);
   assert.deepEqual(run.results[0], { url: ALBUM_URL, title: 'Holiday', percent: 100, uploaded: 2, bytes: 5000, failed: 0 });
 
   const s = local.get(stateKey(ALBUM_URL));
@@ -132,7 +136,7 @@ test('sync copies oldest first and records progress and stats', async () => {
   assert.equal(s.lastSync.files, 2);
   assert.ok(s.log.some((l) => l.includes('Copied IMG_2.jpg')));
   assert.deepEqual(metadata.get('new-IMG_2.jpg'), { [RECORD_KEY]: { mediaKey: key(2), dedupKey: 'dedup2' } }, 'copies are marked in Immich');
-  assert.deepEqual(Object.keys(local.get('recorded')), [key(2), key(3)]);
+  assert.deepEqual(Object.keys(local.get('recorded')).sort(), [key(2), key(3)]);
 
   const phases = snapshots.map((o) => o[stateKey(ALBUM_URL)]?.phase).filter(Boolean);
   const order = [...new Set(phases)];
@@ -148,30 +152,53 @@ test('a second run is refused while the lock is held', async () => {
   session.clear();
 });
 
-test('a stop request ends the run without counting the interrupted item as failed', async () => {
+test('copies run a few at a time, and a stop request ends the run without counting the interrupted items as failed', async () => {
   uploads.length = 0;
   const before = local.get(stateKey(ALBUM_URL));
-  let downloads = 0;
-  onFetch = async (url) => {
-    if (url.endsWith('=d') && ++downloads === 2) await requestStop(await getLock());
+  const held = new Map(); // download number -> release
+  onFetch = (url, init) => {
+    const n = url.match(/\/p(\d)=d$/)?.[1];
+    if (!n) return;
+    return new Promise((resolve) => {
+      held.set(n, resolve);
+      init.signal?.addEventListener('abort', resolve);
+    });
   };
-  const run = await runSync({ urls: [ALBUM2_URL, ALBUM_URL] });
-  onFetch = null;
+  const until = async (cond) => {
+    for (const end = Date.now() + 2000; !cond(); await new Promise((r) => setImmediate(r))) {
+      if (Date.now() > end) throw new Error(`timed out; downloads held: ${[...held.keys()]}`);
+    }
+  };
+  const running = runSync({ urls: [ALBUM2_URL, ALBUM_URL] });
+  let run;
+  try {
+    await until(() => held.size === 3);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual([...held.keys()], ['4', '5', '6'], 'the three oldest download at once, the fourth waits');
+    held.get('4')();
+    await until(() => held.has('7'));
+    assert.deepEqual(uploads, ['IMG_4.jpg'], 'the fourth starts once the first is copied');
+  } finally {
+    // Stop while 5, 6 and 7 are downloading (or, if the test failed, so later tests can run).
+    const lock = await getLock();
+    if (lock) await requestStop(lock);
+    run = await running;
+    onFetch = null;
+  }
 
-  assert.deepEqual(uploads, ['IMG_4.jpg'], 'stopped during the second download');
   assert.equal(run.stopped, true);
   assert.equal(run.error, undefined);
   assert.deepEqual(run.results, [{ url: ALBUM2_URL, title: 'Party', stopped: true, uploaded: 1, bytes: 4000, failed: 0 }]);
   const s = local.get(stateKey(ALBUM2_URL));
   assert.equal(s.phase, 'stopped');
-  assert.equal(s.run.current, null);
+  assert.deepEqual(s.run.active, []);
   assert.deepEqual([s.inImmich, s.missing, s.failed], [1, 3, 0]);
   assert.match(s.log.at(-1), /Sync stopped after copying 1 /);
   assert.deepEqual(local.get(stateKey(ALBUM_URL)), before, 'albums after the stopped one are left alone');
   assert.equal(session.size, 0, 'lock and stop request cleared');
 
   const next = await runSync({ urls: [ALBUM2_URL] });
-  assert.deepEqual(uploads, ['IMG_4.jpg', 'IMG_5.jpg', 'IMG_6.jpg', 'IMG_7.jpg'], 'the next sync continues where it stopped');
+  assert.deepEqual(uploads.slice(1).sort(), ['IMG_5.jpg', 'IMG_6.jpg', 'IMG_7.jpg'], 'the next sync continues where it stopped');
   assert.equal(next.stopped, undefined);
   assert.equal(local.get(stateKey(ALBUM2_URL)).phase, 'done');
 });

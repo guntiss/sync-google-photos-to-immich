@@ -40,22 +40,26 @@ function couldBeCopy(asset, it) {
   return d <= MAX_SHIFT_MS && (it.isVideo || d % QUARTER_HOUR_MS === 0);
 }
 
-// Runs fn over list, at most n at a time; stops starting new ones after a failure.
+// Runs fn over list, at most n at a time. After a failure it starts no more, waits for the
+// running ones to finish, then throws the first error.
 async function eachLimit(list, n, fn) {
   let next = 0;
-  let failed = false;
+  let failure = null;
   const worker = async () => {
-    while (!failed && next < list.length) {
+    while (!failure && next < list.length) {
       try {
         await fn(list[next++]);
       } catch (err) {
-        failed = true;
-        throw err;
+        failure ??= { err };
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(n, list.length) }, worker));
+  if (failure) throw failure.err;
 }
+
+// Items downloaded and uploaded at the same time. Each is held in memory while in flight.
+const PARALLEL_COPIES = 3;
 
 /**
  * Find Immich assets whose RECORD_KEY record names one of `items`, by mediaKey or, for the
@@ -116,7 +120,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
     mode: dryRun ? 'check' : 'sync',
     message: null,
     listed: 0,
-    run: { startedAt: Date.now(), finishedAt: null, toUpload: 0, done: 0, uploadedFiles: 0, uploadedBytes: 0, failed: 0, current: null },
+    run: { startedAt: Date.now(), finishedAt: null, toUpload: 0, done: 0, uploadedFiles: 0, uploadedBytes: 0, failed: 0, active: [] },
   });
   await report.save(true);
 
@@ -228,7 +232,8 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
     await record(unmarked.map((it) => ({ it, assetId: ledger[it.mediaKey] })));
   }
 
-  // Upload missing items, oldest first (so an interrupted run leaves no gaps in the past).
+  // Upload missing items, oldest first (so an interrupted run leaves few gaps in the past),
+  // PARALLEL_COPIES at a time.
   missing.sort((a, b) => a.takenMs - b.takenMs);
   const queue = dryRun ? [] : missing.slice(0, limit);
   s.run.toUpload = queue.length;
@@ -238,20 +243,23 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
   }
   await report.save(true);
 
-  for (const it of queue) {
+  // run.active lists the items in flight: {name, step: 'downloading' | 'uploading', received, size, isVideo}.
+  const copy = async (it) => {
     signal?.throwIfAborted();
-    s.run.current = { name: null, step: 'downloading', received: 0, size: null, isVideo: it.isVideo };
+    const cur = { name: null, step: 'downloading', received: 0, size: null, isVideo: it.isVideo };
+    s.run.active.push(cur);
     report.save();
+    let assetId = null;
     try {
       const file = await downloadOriginal(it, {
         signal,
         onProgress: ({ filename, received, total }) => {
-          Object.assign(s.run.current, { name: filename, received, size: total });
+          Object.assign(cur, { name: filename, received, size: total });
           report.save();
         },
       });
       if (file.sha1Key !== it.dedupKey) report.log(`Warning: ${file.filename} differs from Google's checksum (not the original?)`);
-      Object.assign(s.run.current, { name: file.filename, step: 'uploading', received: file.size, size: file.size });
+      Object.assign(cur, { name: file.filename, step: 'uploading', received: file.size, size: file.size });
       report.save();
       const res = await immich.upload({
         blob: file.blob,
@@ -260,6 +268,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
         modifiedAt: new Date(it.takenMs),
         sha1Hex: file.sha1Hex,
       });
+      assetId = res.id;
       status[it.mediaKey] = { state: res.status === 'created' ? 'uploaded' : 'in-immich', assetId: res.id };
       ledger[it.mediaKey] = res.id;
       await chrome.storage.local.set({ ledger });
@@ -274,19 +283,21 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
       } else {
         report.log(`Already in Immich: ${file.filename}`);
       }
-      await record([{ it, assetId: res.id }]);
     } catch (err) {
       if (signal?.aborted) throw err; // stopped, not failed: the item is still to copy
       status[it.mediaKey] = { state: 'error', message: err.message };
       s.missing--;
       s.failed++;
       s.run.failed++;
-      report.log(`Failed ${s.run.current.name ?? it.mediaKey}: ${err.message}`);
+      report.log(`Failed ${cur.name ?? it.mediaKey}: ${err.message}`);
+    } finally {
+      s.run.active.splice(s.run.active.indexOf(cur), 1);
     }
     s.run.done++;
     await report.save(true);
-  }
-  s.run.current = null;
+    if (assetId) await record([{ it, assetId }]);
+  };
+  await eachLimit(queue, PARALLEL_COPIES, copy);
 
   // Mirror into the Immich album.
   signal?.throwIfAborted();
@@ -367,7 +378,7 @@ export async function runSync({ urls, dryRun = false, trigger = 'manual', onAlbu
         if (signal.aborted) {
           const { title, run } = report.state;
           report.state.phase = 'stopped';
-          run.current = null;
+          run.active = [];
           report.log(`${dryRun ? 'Check' : 'Sync'} stopped` + (run.uploadedFiles ? ` after copying ${run.uploadedFiles} (${mb(run.uploadedBytes)})` : ''));
           await report.save(true);
           lastRun.results.push({ url, title, stopped: true, uploaded: run.uploadedFiles, bytes: run.uploadedBytes, failed: run.failed });

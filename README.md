@@ -34,10 +34,11 @@ videos are both supported.
   browser, or after a reinstall, recognises them instead of copying them again.
 - Works alongside an [immich-go](https://github.com/simulot/immich-go) Google Takeout import:
   use Takeout for the bulk history, the extension for everything added afterwards.
-- Uploads missing items **oldest first**, so an interrupted run never leaves gaps.
+- Copies missing items **oldest first**, three at a time, so an interrupted run leaves no gaps
+  beyond the few files that were in flight.
 - Mirrors each Google album into an Immich album with the same name (created if missing).
 - Photos and videos; originals are downloaded, not thumbnails.
-- Per-album progress: percentage in Immich, the file being copied, download progress,
+- Per-album progress: percentage in Immich, the files being copied, download progress,
   speed and time left. It works for background syncs too, and the toolbar icon shows the percentage.
 - Stats: items in Immich, still to copy, failed, and files and bytes copied per sync and in total.
 - **Check** compares an album with Immich without copying anything.

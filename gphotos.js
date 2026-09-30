@@ -360,7 +360,9 @@ export async function downloadOriginal(item, { onProgress, signal } = {}) {
   const filename = filenameFromDisposition(res.headers.get('content-disposition') || '') || `${item.mediaKey}.${ext}`;
   const total = Number(res.headers.get('content-length')) || null;
 
-  let buf;
+  // Kept as one Blob (which the browser may page to disk) since several downloads can be in
+  // memory at once; the bytes are read out only to hash them.
+  let blob;
   if (onProgress && res.body) {
     const reader = res.body.getReader();
     const chunks = [];
@@ -373,16 +375,16 @@ export async function downloadOriginal(item, { onProgress, signal } = {}) {
       received += value.byteLength;
       onProgress({ filename, received, total });
     }
-    buf = await new Blob(chunks).arrayBuffer();
+    blob = new Blob(chunks, { type });
   } else {
-    buf = await res.arrayBuffer();
+    blob = await res.blob();
   }
-  const digest = await crypto.subtle.digest('SHA-1', buf);
+  const digest = await crypto.subtle.digest('SHA-1', await blob.arrayBuffer());
   return {
-    blob: new Blob([buf], { type }),
+    blob,
     filename,
     sha1Hex: hex(digest),
     sha1Key: toDedupKey(digest),
-    size: buf.byteLength,
+    size: blob.size,
   };
 }

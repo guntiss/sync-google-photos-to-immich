@@ -133,6 +133,10 @@ input, select {
 .status.warn { color: var(--warn); }
 .status.err { color: var(--err); }
 .status .sub { color: var(--muted); margin-left: 6px; }
+.status .transfer {
+  display: block; color: var(--muted); font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 16px; margin: 0 0 8px; }
 @media (max-width: 560px) { .stats { grid-template-columns: repeat(2, 1fr); } }

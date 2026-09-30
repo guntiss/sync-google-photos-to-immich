@@ -152,12 +152,15 @@ function describe(s, running, interrupted) {
       case 'album':
         return { text: 'Updating the Immich album…' };
       case 'uploading': {
-        const cur = r.current;
-        const step = !cur
-          ? ''
-          : cur.step === 'uploading'
-            ? ` · uploading ${fmtBytes(cur.size)} to Immich…`
-            : ` · downloading ${fmtBytes(cur.received)}${cur.size ? ` of ${fmtBytes(cur.size)}` : ''}`;
+        const active = r.active ?? [];
+        const transfers = active.map((cur) => {
+          const name = cur.name ?? (cur.isVideo ? 'Video' : 'Photo');
+          const step =
+            cur.step === 'uploading'
+              ? `uploading ${fmtBytes(cur.size)} to Immich…`
+              : `downloading ${fmtBytes(cur.received)}${cur.size ? ` of ${fmtBytes(cur.size)}` : ''}`;
+          return `${name} · ${step}`;
+        });
         let sub = '';
         if (r.done > 0 && r.uploadStartedAt) {
           const elapsed = Date.now() - r.uploadStartedAt;
@@ -165,8 +168,10 @@ function describe(s, running, interrupted) {
           const left = (elapsed / r.done) * (r.toUpload - r.done);
           sub = `${fmtBytes(rate)}/s · about ${fmtDuration(left)} left`;
         }
-        const n = Math.min(r.done + 1, r.toUpload);
-        return { text: `Copying ${num(n)} of ${num(r.toUpload)}${cur?.name ? `: ${cur.name}` : ''}${step}`, sub };
+        const from = Math.min(r.done + 1, r.toUpload);
+        const to = Math.min(r.done + active.length, r.toUpload);
+        const range = to > from ? `${num(from)}–${num(to)}` : num(from);
+        return { text: `Copying ${range} of ${num(r.toUpload)}`, sub, transfers };
       }
     }
   }
@@ -215,7 +220,11 @@ function updateCard(url) {
 
   const d = running && stopping() ? { text: 'Stopping…' } : describe(s, running, interrupted);
   c.status.className = `status ${d.tone ?? ''}`;
-  c.status.replaceChildren(d.text ?? '', d.sub ? el('span', { className: 'sub' }, d.sub) : '');
+  c.status.replaceChildren(
+    d.text ?? '',
+    d.sub ? el('span', { className: 'sub' }, d.sub) : '',
+    ...(d.transfers ?? []).map((t) => el('span', { className: 'transfer' }, t)),
+  );
 
   const r = s?.run;
   const last = s?.lastSync;

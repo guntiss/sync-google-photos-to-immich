@@ -104,7 +104,11 @@ const overviewSeed = {
       run: {
         startedAt: now - 41 * MIN + 1e3, uploadStartedAt: now - 40 * MIN, finishedAt: null,
         toUpload: 1242, done: 781, uploadedFiles: 780, uploadedBytes: 6.4e9, failed: 1,
-        current: { name: 'PXL_20260714_183512.mp4', step: 'downloading', received: 87.3e6, size: 214.6e6, isVideo: true },
+        active: [
+          { name: 'PXL_20260714_183512.mp4', step: 'downloading', received: 87.3e6, size: 214.6e6, isVideo: true },
+          { name: 'PXL_20260714_184027.jpg', step: 'uploading', received: 4.1e6, size: 4.1e6, isVideo: false },
+          { name: 'PXL_20260714_184233.jpg', step: 'downloading', received: 1.2e6, size: 3.8e6, isVideo: false },
+        ],
       },
     }),
     [`albumState:${FAMILY}`]: state({
