@@ -5,7 +5,9 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "debug-browser": "node scripts/debug-browser.mjs",
-    "screenshots": "node scripts/screenshots.mjs"
+    "screenshots": "node scripts/screenshots.mjs",
+    "icons": "node scripts/icons.mjs",
+    "package": "node scripts/package.mjs"
   },
   "devDependencies": {
     "playwright-core": "^1.56.0"

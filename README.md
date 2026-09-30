@@ -1,4 +1,4 @@
-# Google Photos → Immich sync
+# Sync Google Photos to Immich
 
 A Chrome extension that keeps selected **Google Photos shared albums** in sync with
 [Immich](https://immich.app), periodically and in the background, using the Google account
@@ -135,6 +135,8 @@ copies. Two things cover that:
 
 ## Privacy and permissions
 
+See [PRIVACY.md](PRIVACY.md) for the full privacy policy. In short:
+
 - The extension contacts only `photos.google.com` / Google's image hosts and the Immich
   server you configure. There is no analytics and no third-party server.
 - Your Immich URL and API key are stored in `chrome.storage.local` on your machine. It is
@@ -159,7 +161,13 @@ copies. Two things cover that:
 ```sh
 npm install
 npm test                # unit tests (mocked fetch, fixtures modelled on real responses)
+npm run screenshots     # README and Chrome Web Store screenshots, from made-up data
+npm run icons           # icons/ and the store promo tile, from the SVG in scripts/icons.mjs
+npm run package         # dist/*.zip for the Chrome Web Store, holding only the runtime files
 ```
+
+[store/listing.md](store/listing.md) has the Chrome Web Store listing text, the permission
+justifications and the privacy answers, ready to paste into the developer dashboard.
 
 To drive the extension from scripts, launch a dedicated Chromium with the extension loaded and
 the DevTools protocol on `:9222` (Chrome ≥ 137 ignores `--load-extension`, so this uses
@@ -178,4 +186,5 @@ Layout: `gphotos.js` (read albums, download originals), `immich.js` (Immich API 
 
 ## Disclaimer
 
-Not affiliated with Google or Immich. Use at your own risk, and keep backups.
+Unofficial. Not affiliated with or endorsed by Google or Immich. Google Photos is a trademark of
+Google LLC, and Immich is a trademark of its owner. Use at your own risk, and keep backups.

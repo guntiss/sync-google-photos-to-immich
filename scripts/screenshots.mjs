@@ -1,7 +1,8 @@
 // Renders README screenshots of the real extension page with made-up data: chrome.* is
 // stubbed, Google Photos / Immich responses are faked with page.route, thumbnails are
 // generated SVG landscapes. Touches no real account or server.
-// usage: npm run screenshots   (writes docs/screenshots/*.png)
+// usage: npm run screenshots   (writes docs/screenshots/*.png and the store/screenshot-*.png
+// Chrome Web Store screenshots)
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const out = path.join(root, 'docs', 'screenshots');
+const store = path.join(root, 'store');
 fs.mkdirSync(out, { recursive: true });
+fs.mkdirSync(store, { recursive: true });
 
 const ORIGIN = 'https://demo.local';
 const IMMICH = 'https://immich.example.com';
@@ -200,8 +203,8 @@ async function routes(page) {
 }
 
 const browser = await chromium.launch({ args: ['--disable-web-security'] });
-async function open(seed) {
-  const ctx = await browser.newContext({ viewport: { width: 1000, height: 900 }, deviceScaleFactor: 2, colorScheme: 'light' });
+async function open(seed, { width = 1000, height = 900, scale = 2 } = {}) {
+  const ctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: scale, colorScheme: 'light' });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
   page.on('console', (m) => m.type() === 'error' && console.error('[console]', m.text()));
@@ -214,33 +217,46 @@ async function open(seed) {
   return page;
 }
 
+// Add albums dialog: the account's shared albums, two of them ticked.
+async function showPicker(page) {
+  await page.click('#openPicker');
+  await page.locator('.pick').first().waitFor();
+  await page.getByText('Ski week 2026').click();
+  await page.getByText('Grandma’s 80th birthday').click();
+  await page.waitForFunction(() => {
+    const bottom = document.querySelector('#pickerList').getBoundingClientRect().bottom;
+    return [...document.querySelectorAll('.pick img')].every((i) => i.getBoundingClientRect().top > bottom || i.naturalWidth > 0);
+  });
+  await page.waitForTimeout(300);
+}
+
+// Photos panel of an album: opening it runs a real Check against the fakes.
+async function showPhotos(page) {
+  const card = page.locator('.card').first();
+  await card.locator('.photos summary').click();
+  await card.locator('.grid .item').first().waitFor();
+  await page.selectOption('.filter', 'all');
+  await page.waitForFunction(() => [...document.querySelectorAll('.grid img')].every((i) => i.naturalWidth > 0));
+  await page.waitForTimeout(500);
+  return card;
+}
+
+// README screenshots.
+
 // 1. Overview: one album syncing (background run), one up to date, one with new photos.
 let page = await open(overviewSeed);
 await page.screenshot({ path: path.join(out, 'overview.png'), fullPage: true });
 await page.context().close();
 
-// 2. Add albums dialog: the account's shared albums, two of them ticked.
+// 2. Add albums dialog.
 page = await open({ ...overviewSeed, session: {} });
-await page.click('#openPicker');
-await page.locator('.pick').first().waitFor();
-await page.getByText('Ski week 2026').click();
-await page.getByText('Grandma’s 80th birthday').click();
-await page.waitForFunction(() => {
-  const bottom = document.querySelector('#pickerList').getBoundingClientRect().bottom;
-  return [...document.querySelectorAll('.pick img')].every((i) => i.getBoundingClientRect().top > bottom || i.naturalWidth > 0);
-});
-await page.waitForTimeout(300);
+await showPicker(page);
 await page.locator('#picker').screenshot({ path: path.join(out, 'add-albums.png') });
 await page.context().close();
 
-// 3. Photos panel of an album: opening it runs a real Check against the fakes.
+// 3. Photos panel.
 page = await open(photosSeed);
-const card = page.locator('.card').first();
-await card.locator('.photos summary').click();
-await card.locator('.grid .item').first().waitFor();
-await page.selectOption('.filter', 'all');
-await page.waitForFunction(() => [...document.querySelectorAll('.grid img')].every((i) => i.naturalWidth > 0));
-await page.waitForTimeout(500);
+const card = await showPhotos(page);
 await card.screenshot({ path: path.join(out, 'photos.png') });
 
 // 4. Settings dialog.
@@ -250,5 +266,34 @@ await page.waitForTimeout(300);
 await page.screenshot({ path: path.join(out, 'settings.png'), clip: { x: 0, y: 0, width: 1000, height: 690 } });
 await page.context().close();
 
+// Chrome Web Store screenshots: the same scenes, 1280x800 and full bleed.
+const STORE = { width: 1280, height: 800, scale: 1 };
+const shot = (p, name) => p.screenshot({ path: path.join(store, name) });
+
+page = await open(overviewSeed, STORE);
+await shot(page, 'screenshot-1-overview.png');
+await page.context().close();
+
+page = await open({ ...overviewSeed, session: {} }, STORE);
+await showPicker(page);
+await shot(page, 'screenshot-2-add-albums.png');
+await page.context().close();
+
+page = await open(photosSeed, STORE);
+await (await showPhotos(page)).evaluate((el) => window.scrollTo(0, el.getBoundingClientRect().top + window.scrollY - 16));
+await page.waitForTimeout(300);
+await shot(page, 'screenshot-3-photos.png');
+await page.context().close();
+
+page = await open(photosSeed, STORE);
+await page.click('#openSettings');
+await page.waitForTimeout(300);
+await shot(page, 'screenshot-4-settings.png');
+await page.context().close();
+
 await browser.close();
-for (const f of fs.readdirSync(out)) console.log(f, `${Math.round(fs.statSync(path.join(out, f)).size / 1024)} KB`);
+for (const dir of [out, store]) {
+  for (const f of fs.readdirSync(dir).filter((f) => f.startsWith('screenshot') || dir === out)) {
+    console.log(path.relative(root, path.join(dir, f)), `${Math.round(fs.statSync(path.join(dir, f)).size / 1024)} KB`);
+  }
+}

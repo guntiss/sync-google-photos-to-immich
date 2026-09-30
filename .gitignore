@@ -2,3 +2,4 @@ node_modules/
 .debug-profile/
 .debug-browser.log
 .debug-ext/
+dist/

@@ -17,6 +17,7 @@ fs.mkdirSync(root);
 for (const f of fs.readdirSync(repo).filter((f) => /\.(js|html|css|json)$/.test(f) && f !== 'package.json' && f !== 'package-lock.json')) {
   fs.copyFileSync(path.join(repo, f), path.join(root, f));
 }
+fs.cpSync(path.join(repo, 'icons'), path.join(root, 'icons'), { recursive: true });
 if (process.env.IMMICH_ORIGIN) {
   const mf = path.join(root, 'manifest.json');
   const m = JSON.parse(fs.readFileSync(mf, 'utf8'));

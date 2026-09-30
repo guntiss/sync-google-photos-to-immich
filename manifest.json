@@ -1,8 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Google Photos → Immich sync",
+  "name": "Sync Google Photos to Immich",
   "version": "0.1.0",
-  "description": "Sync selected Google Photos albums to Immich using your signed-in browser session.",
+  "description": "Copy Google Photos shared albums to your Immich server in the background, using your signed-in browser session. Unofficial.",
+  "homepage_url": "https://github.com/guntiss/gphotos-immich-extension",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "permissions": [
     "storage",
     "alarms"
@@ -18,7 +25,11 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Google Photos → Immich sync"
+    "default_title": "Sync Google Photos to Immich",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
   },
   "optional_host_permissions": [
     "https://*/*",
