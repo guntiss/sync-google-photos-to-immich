@@ -1,8 +1,8 @@
-import { listAlbum } from './gphotos.js';
+import { listAlbum, listAlbums, parseAlbumUrl } from './gphotos.js';
 import { Immich, normalizeBaseUrl } from './immich.js';
 import { ALARM, BusyError, loadConfig, runSync } from './sync.js';
 import {
-  getLock, getStates, isLockActive, LOCK_KEY, percentDone, removeState, RUNNING_PHASES, urlFromKey,
+  getLock, getStates, isLockActive, LOCK_KEY, percentDone, removeState, RUNNING_PHASES, stateKey, urlFromKey,
 } from './state.js';
 
 const $ = (id) => document.getElementById(id);
@@ -124,7 +124,7 @@ function createCard(url) {
 }
 
 function describe(s, running, interrupted) {
-  if (!s) return { text: 'Not checked yet. Click Check to compare it with Immich.' };
+  if (!s?.phase) return { text: 'Not checked yet. Click Check to compare it with Immich.' };
   if (interrupted) {
     const where = s.phase === 'uploading' ? ` after ${s.run.done} of ${s.run.toUpload}` : '';
     return { text: `Interrupted${where}. Run Sync again to continue.`, tone: 'warn' };
@@ -229,7 +229,12 @@ function renderAlbums() {
   const main = $('albums');
   for (const url of cards.keys()) if (!config.albums.includes(url)) cards.delete(url);
   if (!config.albums.length) {
-    main.replaceChildren(el('div', { className: 'empty' }, 'No albums yet. Paste a Google Photos shared album link below to start.'));
+    main.replaceChildren(
+      el('div', { className: 'empty' },
+        el('p', {}, 'No albums yet. Pick the Google Photos albums you want in Immich.'),
+        el('button', { className: 'primary', type: 'button', onclick: openPicker }, '+ Add albums'),
+      ),
+    );
     return;
   }
   main.replaceChildren(...config.albums.map((url) => (cards.get(url) ?? createCard(url)).node));
@@ -347,6 +352,193 @@ function isAlbumLink(raw) {
   }
 }
 
+function shareIdOf(url) {
+  try {
+    return parseAlbumUrl(url).shareId;
+  } catch {
+    return null;
+  }
+}
+
+// Links and Google album keys of the albums already in the list, so an album is
+// recognised whichever link it was added with.
+function addedKeys() {
+  const keys = new Set(config.albums);
+  for (const url of config.albums) {
+    const key = states[url]?.albumKey ?? shareIdOf(url);
+    if (key) keys.add(key);
+  }
+  return keys;
+}
+
+// entries: [{url, title?, albumKey?}]
+async function addAlbums(entries) {
+  const urls = entries.map((e) => e.url);
+  const seeds = {};
+  for (const { url, title, albumKey } of entries) {
+    if (!title) continue;
+    states[url] = { title, albumKey }; // so the card is named before the first check
+    seeds[stateKey(url)] = states[url];
+  }
+  config.albums = [...config.albums, ...urls];
+  await chrome.storage.local.set({ albums: config.albums, ...seeds });
+  renderAlbums();
+  renderOverview();
+  if (configured()) start({ urls, dryRun: true });
+}
+
+// The picker lists the account's shared albums (Google Photos' own album list), so
+// nobody has to copy links. Rows are built once per load; search only hides them.
+const picker = { loading: false, error: null, account: null, albums: null, groups: [], selected: new Set() };
+
+const monthYear = (ms) => new Date(ms).toLocaleDateString([], { month: 'short', year: 'numeric' });
+
+function pickerRow(album) {
+  const box = el('input', { type: 'checkbox' });
+  const img = el('img', { alt: '' });
+  if (album.coverUrl) {
+    img.dataset.src = `${album.coverUrl}=w96-h96-c`;
+    thumbObserver.observe(img);
+  }
+  const from = album.firstMs && monthYear(album.firstMs);
+  const to = album.lastMs && monthYear(album.lastMs);
+  const meta = [
+    album.count === null ? null : plural(album.count, 'item'),
+    from && (!to || to === from ? from : `${from} – ${to}`),
+  ].filter(Boolean).join(' · ');
+  const node = el('label', { className: 'pick' },
+    box,
+    img,
+    el('span', { className: 'pick-text' },
+      el('span', { className: 'pick-title' }, album.title || 'Untitled'),
+      el('span', { className: 'pick-meta' }, meta),
+    ),
+    el('span', { className: 'tag' }, '✓ Added'),
+  );
+  box.onchange = () => {
+    if (box.checked) picker.selected.add(album.url);
+    else picker.selected.delete(album.url);
+    renderPicker();
+  };
+  return { node, box, album };
+}
+
+const PICKER_GROUPS = [
+  [false, 'Shared with you'],
+  [true, 'Shared by you'],
+  [null, 'Shared albums'], // owner unknown
+];
+
+function buildPicker() {
+  const shared = picker.albums.filter((a) => a.url);
+  picker.selected = new Set(shared.map((a) => a.url).filter((u) => picker.selected.has(u)));
+  picker.groups = PICKER_GROUPS.flatMap(([owned, name]) => {
+    const rows = shared.filter((a) => a.ownedByMe === owned).map(pickerRow);
+    if (!rows.length) return [];
+    const toggle = el('button', { type: 'button', className: 'link' });
+    toggle.onclick = () => {
+      const open = rows.filter((r) => !r.node.hidden && !r.box.disabled);
+      const select = open.some((r) => !r.box.checked);
+      open.forEach((r) => (select ? picker.selected.add(r.album.url) : picker.selected.delete(r.album.url)));
+      renderPicker();
+    };
+    const node = el('section', { className: 'pick-group' },
+      el('div', { className: 'pick-head' }, el('h3', {}, name), toggle),
+      ...rows.map((r) => r.node),
+    );
+    return [{ node, toggle, rows }];
+  });
+  $('pickerList').replaceChildren(...picker.groups.map((g) => g.node));
+}
+
+async function loadPicker() {
+  picker.loading = true;
+  picker.error = null;
+  renderPicker();
+  try {
+    ({ account: picker.account, albums: picker.albums } = await listAlbums());
+    buildPicker();
+  } catch (err) {
+    picker.error = `Could not read your albums from Google Photos: ${err.message}`;
+  } finally {
+    picker.loading = false;
+    renderPicker();
+  }
+}
+
+function renderPicker() {
+  const { loading, error, albums, groups } = picker;
+  const added = addedKeys();
+  const query = $('pickerSearch').value.trim();
+  const q = query.toLocaleLowerCase();
+  let shown = 0;
+  for (const g of groups) {
+    for (const r of g.rows) {
+      const isAdded = added.has(r.album.url) || added.has(r.album.albumKey);
+      if (isAdded) picker.selected.delete(r.album.url);
+      r.node.classList.toggle('added', isAdded);
+      r.box.disabled = isAdded;
+      r.box.checked = isAdded || picker.selected.has(r.album.url);
+      r.node.hidden = Boolean(q) && !r.album.title.toLocaleLowerCase().includes(q);
+    }
+    const visible = g.rows.filter((r) => !r.node.hidden);
+    const open = visible.filter((r) => !r.box.disabled);
+    g.node.hidden = !visible.length;
+    g.toggle.hidden = !open.length;
+    g.toggle.textContent = open.length && open.every((r) => r.box.checked) ? 'Select none' : 'Select all';
+    shown += visible.length;
+  }
+
+  const total = groups.reduce((n, g) => n + g.rows.length, 0);
+  const msg = loading
+    ? 'Looking for albums in Google Photos…'
+    : error
+      ? error
+      : !albums
+        ? null
+        : !total
+          ? 'No shared albums in this Google account yet.'
+          : !shown
+            ? `No albums match “${query}”.`
+            : null;
+  $('pickerMsg').hidden = !msg;
+  $('pickerMsg').textContent = msg ?? '';
+  $('pickerMsg').classList.toggle('err', Boolean(error) && !loading);
+  $('pickerList').hidden = loading || Boolean(error);
+  $('pickerSearch').hidden = loading || !total;
+  const account = picker.account ? `${picker.account}, the Google account` : 'the Google account';
+  $('pickerAccount').textContent = `Shared albums in ${account} signed in to Chrome. Pick the ones to copy to Immich.`;
+  const unshared = loading || error ? 0 : (albums?.filter((a) => !a.url).length ?? 0);
+  $('pickerNote').hidden = !unshared;
+  $('pickerNote').textContent =
+    `${plural(unshared, 'album')} of yours ${unshared === 1 ? "isn't" : "aren't"} listed because only shared albums ` +
+    'can be synced. To sync one, share it in Google Photos first.';
+  $('refreshPicker').disabled = loading;
+
+  const n = picker.selected.size;
+  $('addPicked').disabled = !n;
+  $('addPicked').textContent = n ? `Add ${plural(n, 'album')}` : 'Add';
+}
+
+function openPicker() {
+  $('addError').hidden = true;
+  if (!$('picker').open) $('picker').showModal();
+  if (!picker.albums && !picker.loading) loadPicker();
+  else renderPicker();
+}
+
+$('openPicker').onclick = openPicker;
+$('refreshPicker').onclick = loadPicker;
+$('cancelPicker').onclick = () => $('picker').close();
+$('pickerSearch').oninput = renderPicker;
+
+$('addPicked').onclick = async () => {
+  const entries = picker.groups.flatMap((g) => g.rows).filter((r) => picker.selected.has(r.album.url)).map((r) => r.album);
+  picker.selected.clear();
+  $('picker').close();
+  await addAlbums(entries);
+};
+
 $('addForm').onsubmit = async (e) => {
   e.preventDefault();
   const raw = $('addUrl').value.trim();
@@ -357,17 +549,15 @@ $('addForm').onsubmit = async (e) => {
     err.hidden = false;
     return;
   }
-  if (config.albums.includes(raw)) {
+  const added = addedKeys();
+  if (added.has(raw) || added.has(shareIdOf(raw))) {
     err.textContent = 'That album is already in the list.';
     err.hidden = false;
     return;
   }
-  config.albums = [...config.albums, raw];
-  await chrome.storage.local.set({ albums: config.albums });
   $('addUrl').value = '';
-  renderAlbums();
-  renderOverview();
-  if (configured()) start({ urls: [raw], dryRun: true });
+  $('picker').close();
+  await addAlbums([{ url: raw }]);
 };
 
 async function removeAlbum(url) {
@@ -514,6 +704,7 @@ $('settingsForm').onsubmit = async (e) => {
   updateConnection();
   setTimeout(() => refreshAlarm().then(renderOverview), 500); // background re-schedules on save
   refreshAll();
+  if (!config.albums.length) openPicker();
 };
 
 $('cancelSettings').onclick = () => $('settings').close();
@@ -545,6 +736,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
       states = s;
       renderAlbums();
       renderOverview();
+      if ($('picker').open) renderPicker();
     });
   }
   renderOverview();

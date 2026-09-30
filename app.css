@@ -29,6 +29,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   background: var(--bg);
   color: var(--fg);
@@ -99,6 +100,7 @@ input, select {
 .tile .k { color: var(--muted); font-size: 12px; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
 .toolbar .muted { margin-left: 8px; }
+.toolbar #openPicker { margin-left: auto; }
 
 /* album cards */
 .card {
@@ -176,9 +178,47 @@ pre.log {
   color: var(--muted);
   margin-bottom: 12px;
 }
+.empty p { margin: 0 0 12px; }
 
 .add { display: flex; gap: 8px; }
 .add input { flex: 1; min-width: 0; }
+
+/* add albums dialog */
+dialog.picker { width: min(620px, calc(100vw - 32px)); }
+.picker .lead { margin: -8px 0 12px; }
+#pickerSearch { width: 100%; margin-bottom: 8px; }
+#pickerMsg { margin: 16px 0; }
+#pickerMsg.err { color: var(--err); }
+.picker-list { max-height: min(52vh, 460px); overflow: auto; margin: 0 -20px; padding: 0 20px 6px; }
+.pick-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+  padding: 10px 0 4px;
+}
+.pick-head h3 { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+button.link { border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 12px; }
+button.link:hover { text-decoration: underline; }
+.picker-list label.pick { display: flex; align-items: center; gap: 12px; margin: 0; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
+.pick:hover { background: var(--bg); }
+.pick input { accent-color: var(--accent); margin: 0; flex: none; }
+.pick img { width: 44px; height: 44px; border-radius: 6px; object-fit: cover; background: var(--track); flex: none; }
+.pick-text { display: grid; flex: 1; min-width: 0; }
+.pick-title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-meta { color: var(--muted); font-size: 12px; }
+.pick .tag { display: none; color: var(--ok); font-size: 12px; flex: none; }
+.picker-list label.pick.added { cursor: default; }
+.pick.added:hover { background: none; }
+.pick.added .pick-title { color: var(--muted); }
+.pick.added .tag { display: inline; }
+#pickerNote { font-size: 12px; margin: 10px 0 0; }
+.by-link .add { margin-top: 4px; }
+.picker .dialog-actions { margin-top: 16px; }
+.dialog-actions .left { margin-right: auto; }
 
 /* settings dialog */
 dialog {

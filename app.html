@@ -21,16 +21,33 @@
       <button id="syncAll" class="primary" type="button">Sync all</button>
       <button id="checkAll" type="button" title="Compare with Immich without copying anything">Check all</button>
       <span id="schedule" class="muted"></span>
+      <button id="openPicker" type="button">+ Add albums</button>
     </div>
   </section>
 
   <main id="albums"></main>
 
-  <form id="addForm" class="add">
-    <input id="addUrl" type="url" placeholder="Paste a Google Photos shared album link (photos.google.com/share/… or photos.app.goo.gl/…)" required>
-    <button class="primary" type="submit">Add album</button>
-  </form>
-  <p id="addError" class="error-text" hidden></p>
+  <dialog id="picker" class="picker">
+    <h2>Add albums</h2>
+    <p id="pickerAccount" class="muted lead"></p>
+    <input id="pickerSearch" type="search" placeholder="Search albums" autocomplete="off" spellcheck="false">
+    <p id="pickerMsg" class="muted"></p>
+    <div id="pickerList" class="picker-list"></div>
+    <p id="pickerNote" class="muted"></p>
+    <details class="by-link">
+      <summary>Add by link instead</summary>
+      <form id="addForm" class="add">
+        <input id="addUrl" type="url" placeholder="photos.google.com/share/… or photos.app.goo.gl/…" spellcheck="false" required>
+        <button type="submit">Add</button>
+      </form>
+      <p id="addError" class="error-text" hidden></p>
+    </details>
+    <div class="dialog-actions">
+      <button id="refreshPicker" class="left" type="button">Refresh</button>
+      <button id="cancelPicker" type="button">Cancel</button>
+      <button id="addPicked" class="primary" type="button" disabled>Add</button>
+    </div>
+  </dialog>
 
   <dialog id="settings">
     <form id="settingsForm" method="dialog">

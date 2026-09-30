@@ -4,7 +4,7 @@ A Chrome extension that keeps selected **Google Photos shared albums** in sync w
 [Immich](https://immich.app), periodically and in the background, using the Google account
 you are already signed in to in the browser.
 
-Only the albums you list are synced, not your whole library. Photos Immich already has are
+Only the albums you pick are synced, not your whole library. Photos Immich already has are
 detected by checksum and never imported twice. This works with libraries you seeded from a
 Google Takeout export using [immich-go](https://github.com/simulot/immich-go): the extension
 recognises those existing photos correctly and only uploads what's new (tested). Photos and
@@ -27,7 +27,8 @@ videos are both supported.
 
 ## Features
 
-- Sync only the albums you choose (paste their Google Photos URLs).
+- Pick the albums to sync from the shared albums in your Google account, whether shared with
+  you or by you. No links to copy; pasting a share link still works too.
 - Deduplication by SHA-1 against your **entire** Immich library, before anything is downloaded.
 - Works alongside an [immich-go](https://github.com/simulot/immich-go) Google Takeout import:
   use Takeout for the bulk history, the extension for everything added afterwards.
@@ -41,6 +42,10 @@ videos are both supported.
 - Periodic background sync with a configurable interval. Manual and background runs never overlap.
 
 ## Screenshots
+
+**Add albums**, listing the shared albums found in your Google account:
+
+![Add albums dialog listing shared albums, some already added, two ticked](docs/screenshots/add-albums.png)
 
 **Photos in an album**, each marked with whether it is already in Immich:
 
@@ -66,9 +71,12 @@ recreates them from the real extension page.
 2. Enter your **Immich server URL** and an **API key**, and choose how often to sync
    automatically. Chrome asks for permission to reach your Immich server when you save,
    and the connection is tested straight away.
-3. Paste a Google Photos shared album link and click **Add album**. Both
-   `https://photos.google.com/share/...` and `https://photos.app.goo.gl/...` links work. The
-   album is checked right away, so you see how much of it is already in Immich.
+3. Click **Add albums**. It lists the shared albums in the Google account signed in to Chrome:
+   albums shared with you and albums you share. Tick the ones you want and click **Add**. New
+   albums are checked right away, so you see how much of each is already in Immich.
+   Only shared albums can be synced, so to sync one of your own albums, share it in Google
+   Photos first. For an album that isn't listed, use **Add by link instead** and paste its
+   `https://photos.google.com/share/...` or `https://photos.app.goo.gl/...` link.
 4. Click **Sync** on an album, or **Sync all**. After that the background sync takes over.
 
 Each album card shows its percentage in Immich, what is happening now, and its stats.
@@ -85,16 +93,20 @@ for existing photos.
 
 ## How it works
 
-1. **List.** The album page is fetched with your browser's cookies and the photo list is read
+1. **Find.** **Add albums** reads your album list the way the Google Photos *Albums* page does
+   (rpc `Z5xsfc`, including shared albums you've joined). Shared albums come with a
+   `photos.app.goo.gl` link, which is what gets stored.
+2. **List.** The album page is fetched with your browser's cookies and the photo list is read
    from the data embedded in it; further pages come from Google's internal `batchexecute`
-   endpoint (rpc `snAcKc`).
-2. **Deduplicate.** For each photo Google supplies a `dedupKey`, which is the URL-safe base64
+   endpoint (rpc `snAcKc`). Short links are opened through their desktop redirect (`?_imcp=1`),
+   because they otherwise land on an interstitial page.
+3. **Deduplicate.** For each photo Google supplies a `dedupKey`, which is the URL-safe base64
    SHA-1 of the original file. That is exactly what Immich stores as its asset `checksum`, so
    the keys are sent to `POST /assets/bulk-upload-check` and Immich says which it already has.
-3. **Upload.** Only the missing originals are downloaded (`=d` for photos, `=dv` for videos),
+4. **Upload.** Only the missing originals are downloaded (`=d` for photos, `=dv` for videos),
    re-hashed, and uploaded with an `x-immich-checksum` header so Immich itself also refuses
    duplicates.
-4. **Mirror.** Uploaded (and optionally existing) assets are added to an Immich album named
+5. **Mirror.** Uploaded (and optionally existing) assets are added to an Immich album named
    after the Google album.
 
 A small local ledger (`mediaKey → Immich asset id`) stops anything from being re-uploaded if

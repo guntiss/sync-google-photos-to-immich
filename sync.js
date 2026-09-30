@@ -25,7 +25,8 @@ const mb = (n) => `${(n / 1e6).toFixed(1)} MB`;
 /**
  * Sync (or with dryRun, only check) one album, reporting progress into report.state:
  *   phase: listing -> checking -> uploading -> album -> done
- *   total / inImmich / trashed / missing / failed, run: {...this run's stats}, totals: {...all time}
+ *   title / albumKey, total / inImmich / trashed / missing / failed,
+ *   run: {...this run's stats}, totals: {...all time}
  * @returns {{album, status: Record<string, {state: string, assetId?: string, message?: string}>}}
  *   state: 'in-immich' | 'trashed' | 'missing' | 'uploaded' | 'error'
  */
@@ -47,7 +48,7 @@ export async function syncAlbum(albumUrl, settings, immich, report, { dryRun = f
     },
   });
   const videos = album.items.filter((i) => i.isVideo).length;
-  Object.assign(s, { phase: 'checking', title: album.title, total: album.items.length, videos });
+  Object.assign(s, { phase: 'checking', title: album.title, albumKey: album.albumKey, total: album.items.length, videos });
   report.log(`Read "${album.title}" from Google Photos: ${album.items.length} items (${videos} videos)`);
   await report.save(true);
 

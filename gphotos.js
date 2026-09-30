@@ -1,15 +1,19 @@
-// Reads a Google Photos shared album using the browser's signed-in session.
+// Reads Google Photos albums using the browser's signed-in session.
 // There is no official API for this (the Library API no longer exposes
 // user-shared albums), so this uses the same internal endpoints the web UI does:
 //   1. GET the /share/<id> page; the first page of items is embedded in an
 //      AF_initDataCallback({... data: [...]}) blob.
 //   2. Further pages come from POST /_/PhotosUi/data/batchexecute (rpc snAcKc).
+//   3. The account's albums, including shared albums it has joined, come from
+//      the same endpoint (rpc Z5xsfc), as on the /albums page.
 // The format is undocumented, so items are located by shape rather than by
 // fixed indexes wherever possible.
 
 const PHOTOS = 'https://photos.google.com';
 const KEY_PREFIX = 'AF1Qip';
 const VIDEO_INFO_KEY = '76647426';
+const ALBUM_META_KEY = '72930366';
+const SHORT_LINK = /^https:\/\/photos\.app\.goo\.gl\/\w+$/;
 const MAX_PAGES = 500;
 
 export function parseAlbumUrl(input) {
@@ -21,12 +25,22 @@ export function parseAlbumUrl(input) {
   return { shareId: m[1], authKey: u.searchParams.get('key') };
 }
 
+// photos.app.goo.gl links now open an interstitial page; its desktop link (?_imcp=1)
+// redirects to the album instead.
+export function fetchableUrl(input) {
+  const u = new URL(input.trim());
+  if (u.hostname === 'photos.app.goo.gl') u.searchParams.set('_imcp', '1');
+  return u.href;
+}
+
 export function extractDataBlocks(html) {
+  // AF_dataServiceRequests = {'ds:0' : {id:'Z5xsfc', ...}, ...} says which rpc filled each block.
+  const rpcs = Object.fromEntries([...html.matchAll(/'(ds:\d+)' : \{id:'(\w+)'/g)].map((m) => [m[1], m[2]]));
   const re = /AF_initDataCallback\(\{key: '(ds:\d+)'.*?data:(.*?), sideChannel: \{\}\}\);<\/script>/gs;
   const blocks = [];
   for (const m of html.matchAll(re)) {
     try {
-      blocks.push({ key: m[1], data: JSON.parse(m[2]) });
+      blocks.push({ key: m[1], rpc: rpcs[m[1]] ?? null, data: JSON.parse(m[2]) });
     } catch {
       // not JSON; ignore
     }
@@ -142,12 +156,17 @@ function pickTitle(html) {
     .trim();
 }
 
-async function fetchNextPage(ctx, token) {
-  const inner = JSON.stringify([ctx.albumKey, token, null, ctx.authKey]);
-  const freq = JSON.stringify([[['snAcKc', inner, null, 'generic']]]);
+// Session tokens batchexecute needs, from any signed-in photos.google.com page.
+function pageContext(html) {
+  return { at: pickWiz(html, 'SNlM0e'), sid: pickWiz(html, 'FdrFJe'), bl: pickWiz(html, 'cfb2h') };
+}
+
+// Call one rpc; returns its decoded payloads plus the raw response for debugging.
+async function batchExecute(ctx, rpcid, request, sourcePath) {
+  const freq = JSON.stringify([[[rpcid, JSON.stringify(request), null, 'generic']]]);
   const qs = new URLSearchParams({
-    rpcids: 'snAcKc',
-    'source-path': `/share/${ctx.shareId}`,
+    rpcids: rpcid,
+    'source-path': sourcePath,
     hl: 'en',
     _reqid: String(100000 + Math.floor(Math.random() * 900000)),
     rt: 'c',
@@ -163,9 +182,9 @@ async function fetchNextPage(ctx, token) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
     body,
   });
-  if (!res.ok) throw new Error(`batchexecute failed: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`batchexecute ${rpcid} failed: HTTP ${res.status}`);
   const text = await res.text();
-  const payloads = parseBatchExecute(text).filter((p) => p.rpc === 'snAcKc');
+  const payloads = parseBatchExecute(text).filter((p) => p.rpc === rpcid).map((p) => p.data);
   return { payloads, text };
 }
 
@@ -175,7 +194,7 @@ async function fetchNextPage(ctx, token) {
  * @param {{onProgress?: (n: number) => void, debug?: boolean}} opts
  */
 export async function listAlbum(input, opts = {}) {
-  const res = await fetch(input.trim(), { credentials: 'include', redirect: 'follow' });
+  const res = await fetch(fetchableUrl(input), { credentials: 'include', redirect: 'follow' });
   if (res.url.startsWith('https://accounts.google.com/')) {
     throw new Error('Not signed in to Google in this browser profile (redirected to login).');
   }
@@ -219,22 +238,17 @@ export async function listAlbum(input, opts = {}) {
   }
   opts.onProgress?.(items.size);
 
-  const ctx = {
-    shareId,
-    authKey,
-    albumKey: albumKey || shareId,
-    at: pickWiz(html, 'SNlM0e'),
-    sid: pickWiz(html, 'FdrFJe'),
-    bl: pickWiz(html, 'cfb2h'),
-  };
+  const ctx = pageContext(html);
+  albumKey ||= shareId;
 
   let pages = 1;
   while (nextToken && pages < MAX_PAGES) {
-    const { payloads, text } = await fetchNextPage(ctx, nextToken);
+    const request = [albumKey, nextToken, null, authKey];
+    const { payloads, text } = await batchExecute(ctx, 'snAcKc', request, `/share/${shareId}`);
     debug?.pages.push(text);
     const before = items.size;
     let token = null;
-    for (const { data } of payloads) {
+    for (const data of payloads) {
       const p = parsePayload(data);
       p.items.forEach((it) => items.set(it.mediaKey, it));
       if (p.nextToken) token = p.nextToken;
@@ -249,11 +263,68 @@ export async function listAlbum(input, opts = {}) {
   return {
     url: res.url,
     title: albumTitle || pickTitle(html),
-    albumKey: ctx.albumKey,
+    albumKey,
     pages,
     items: sorted,
     ...(debug && { debug }),
   };
+}
+
+// One entry of the albums list (rpc Z5xsfc):
+//   [albumKey, [coverUrl, w, h, ...], ..., [ownerId], ...,
+//    {72930366: [kind, title, [firstTakenMs, lastTakenMs, ...], itemCount, ..., shortLink]}]
+// Only shared albums have a short link.
+export function parseAlbumEntry(e) {
+  if (!Array.isArray(e) || typeof e[0] !== 'string' || !e[0].startsWith(KEY_PREFIX)) return null;
+  const meta = e.find((x) => x && typeof x === 'object' && !Array.isArray(x) && ALBUM_META_KEY in x)?.[ALBUM_META_KEY];
+  if (!Array.isArray(meta) || typeof meta[1] !== 'string') return null;
+  const num = (v) => (typeof v === 'number' ? v : null);
+  return {
+    albumKey: e[0],
+    title: meta[1],
+    count: num(meta[3]),
+    firstMs: num(meta[2]?.[0]),
+    lastMs: num(meta[2]?.[1]),
+    coverUrl: typeof e[1]?.[0] === 'string' ? e[1][0] : null,
+    ownerId: typeof e[6]?.[0] === 'string' ? e[6][0] : null,
+    url: meta.find((x) => typeof x === 'string' && SHORT_LINK.test(x)) ?? null,
+  };
+}
+
+/**
+ * List the signed-in account's albums, including shared albums it has joined, as on
+ * the /albums page. Shared albums have `url` (a photos.app.goo.gl link listAlbum can
+ * read); albums that aren't shared have url: null.
+ * @returns {Promise<{account: string|null, albums: Array<ReturnType<typeof parseAlbumEntry> & {ownedByMe: boolean|null}>}>}
+ */
+export async function listAlbums() {
+  const res = await fetch(`${PHOTOS}/albums`, { credentials: 'include' });
+  if (!res.ok) throw new Error(`Albums page failed: HTTP ${res.status}`);
+  const html = await res.text();
+  const ctx = pageContext(html);
+  if (!ctx.at || !res.url.startsWith(PHOTOS)) {
+    throw new Error('Not signed in to Google in this browser profile.');
+  }
+  // rpc O3G8Nd describes the signed-in user: [actorId, gaiaId, ..., [name, ...] at 11, ...]
+  const self = extractDataBlocks(html).find((b) => b.rpc === 'O3G8Nd')?.data?.[0];
+  const me = typeof self?.[0] === 'string' ? self[0] : null;
+  const account = pickWiz(html, 'oPEP7c') || (typeof self?.[11]?.[0] === 'string' ? self[11][0] : null);
+
+  const albums = new Map();
+  let token = null;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const request = [token, null, null, null, 1, null, null, 100, [2], 5];
+    const { payloads } = await batchExecute(ctx, 'Z5xsfc', request, '/albums');
+    const data = payloads[0];
+    for (const e of data?.[0] ?? []) {
+      const a = parseAlbumEntry(e);
+      if (a) albums.set(a.albumKey, { ...a, ownedByMe: me && a.ownerId ? a.ownerId === me : null });
+    }
+    const next = typeof data?.[1] === 'string' ? data[1] : null;
+    if (!next || next === token) break;
+    token = next;
+  }
+  return { account, albums: [...albums.values()] };
 }
 
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');

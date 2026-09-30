@@ -79,6 +79,7 @@ test('check reports what is missing without copying', async () => {
   const s = local.get(stateKey(ALBUM_URL));
   assert.equal(s.phase, 'done');
   assert.equal(s.mode, 'check');
+  assert.equal(s.albumKey, key(999), 'album key recorded, so the picker knows the album is added');
   assert.equal(s.missing, 2);
   assert.equal(session.size, 0, 'lock released');
 });

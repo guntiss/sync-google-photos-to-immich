@@ -37,6 +37,33 @@ const hikingHtml = `<html><body><script>AF_initDataCallback({key: 'ds:1', hash: 
   null, hikingItems, null, ['AF1QipHikeAlbum000000000000000000', 'Hiking trips'],
 ])}, sideChannel: {}});</script></body></html>`;
 
+// ---------- fake Google albums list (/albums page + rpc Z5xsfc) for the Add albums dialog
+
+const ME = 'AF1QipDemoMe000000000000000000000';
+const month = (y, m) => Date.UTC(y, m - 1, 15);
+const pickable = [
+  // [id, title, items, first, last, cover, owner]; ids of the seeded albums match their share links
+  ['Summer', 'Summer in Italy', 1284, month(2026, 6), month(2026, 8), 4, 'other'],
+  ['Ski', 'Ski week 2026', 318, month(2026, 2), month(2026, 2), 11, 'other'],
+  ['Grandma', 'Grandma’s 80th birthday', 146, month(2026, 5), month(2026, 5), 7, 'other'],
+  ['Family', 'Family 2026', 356, month(2026, 1), month(2026, 9), 1, 'other'],
+  ['Concert', 'School concert', 64, month(2026, 5), month(2026, 5), 13, 'other'],
+  ['Wedding', 'Anna & Tom’s wedding', 912, month(2025, 9), month(2025, 9), 5, 'other'],
+  ['Hiking', 'Hiking trips', 18, month(2026, 7), month(2026, 8), 0, 'me'],
+  ['Garden', 'Garden project', 57, month(2025, 4), month(2026, 9), 9, 'me'],
+  ['Road', 'Road trip 2025', 403, month(2025, 7), month(2025, 8), 15, 'me'],
+];
+const albumEntry = ([id, title, count, first, last, cover, owner]) => [
+  `AF1QipDemo${id}Xk3vQ9mZ2rT7bLw4`, [`${THUMBS}${cover}`, 4000, 3000], null, null, null, null,
+  [owner === 'me' ? ME : 'AF1QipDemoFriend0000000000000000'], [], null, null, null,
+  { 72930366: [4, title, [first, last], count, 1, null, [], [], null, null, `https://photos.app.goo.gl/demo${id}`] },
+];
+const unsharedEntry = (n) => [`AF1QipDemoPrivate${n}000000000000000`, null, null, null, null, null, [ME], [], { 72930366: [1, `Private ${n}`, [], 3] }];
+const albumsHtml = `<html><head><script>window.WIZ_global_data = {"SNlM0e":"demo-at","oPEP7c":"alex@example.com"};
+var AF_dataServiceRequests = {'ds:2' : {id:'O3G8Nd',request:[1]}};</script></head><body>
+<script>AF_initDataCallback({key: 'ds:2', hash: '1', data:${JSON.stringify([[ME, '1', null, null, null, null, null, null, null, null, null, ['Alex']]])}, sideChannel: {}});</script></body></html>`;
+const albumsRpc = `)]}'\n\n1\n${JSON.stringify([['wrb.fr', 'Z5xsfc', JSON.stringify([[...pickable.map(albumEntry), ...[1, 2, 3, 4].map(unsharedEntry)]]), null, null, null, 'generic']])}\n`;
+
 function landscape(seed) {
   let x = seed * 7919 + 17;
   const rnd = () => ((x = (x * 9301 + 49297) % 233280) / 233280);
@@ -156,6 +183,8 @@ async function routes(page) {
     return route.fulfill({ status: 404, body: '{}' });
   });
   await page.route('https://photos.google.com/share/**', (route) => route.fulfill({ contentType: 'text/html', body: hikingHtml }));
+  await page.route('https://photos.google.com/albums', (route) => route.fulfill({ contentType: 'text/html', body: albumsHtml }));
+  await page.route('https://photos.google.com/_/PhotosUi/data/batchexecute?rpcids=Z5xsfc*', (route) => route.fulfill({ body: albumsRpc }));
   await page.route(`${THUMBS}*`, (route) => {
     const n = Number(route.request().url().slice(THUMBS.length).split('=')[0]);
     route.fulfill({ contentType: 'image/svg+xml', body: landscape(n + 3) });
@@ -182,7 +211,21 @@ let page = await open(overviewSeed);
 await page.screenshot({ path: path.join(out, 'overview.png'), fullPage: true });
 await page.context().close();
 
-// 2. Photos panel of an album: opening it runs a real Check against the fakes.
+// 2. Add albums dialog: the account's shared albums, two of them ticked.
+page = await open({ ...overviewSeed, session: {} });
+await page.click('#openPicker');
+await page.locator('.pick').first().waitFor();
+await page.getByText('Ski week 2026').click();
+await page.getByText('Grandma’s 80th birthday').click();
+await page.waitForFunction(() => {
+  const bottom = document.querySelector('#pickerList').getBoundingClientRect().bottom;
+  return [...document.querySelectorAll('.pick img')].every((i) => i.getBoundingClientRect().top > bottom || i.naturalWidth > 0);
+});
+await page.waitForTimeout(300);
+await page.locator('#picker').screenshot({ path: path.join(out, 'add-albums.png') });
+await page.context().close();
+
+// 3. Photos panel of an album: opening it runs a real Check against the fakes.
 page = await open(photosSeed);
 const card = page.locator('.card').first();
 await card.locator('.photos summary').click();
@@ -192,7 +235,7 @@ await page.waitForFunction(() => [...document.querySelectorAll('.grid img')].eve
 await page.waitForTimeout(500);
 await card.screenshot({ path: path.join(out, 'photos.png') });
 
-// 3. Settings dialog.
+// 4. Settings dialog.
 await card.locator('.photos summary').click();
 await page.click('#openSettings');
 await page.waitForTimeout(300);

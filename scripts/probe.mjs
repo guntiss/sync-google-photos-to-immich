@@ -17,6 +17,8 @@ await page.waitForSelector('.card, .empty');
 
 const card = page.locator('.card', { has: page.locator(`a.src[href="${url}"]`) });
 if (!(await card.count())) {
+  await page.click('#openPicker');
+  await page.click('#picker .by-link summary');
   await page.fill('#addUrl', url);
   await page.click('#addForm button[type=submit]');
   await card.waitFor();
